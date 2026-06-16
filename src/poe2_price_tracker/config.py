@@ -8,6 +8,8 @@ from typing import Any
 
 
 APP_DIR_NAME = "PoE2PriceTracker"
+RELEASE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker-release/releases/download"
+SOURCE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download"
 
 
 def default_data_dir() -> Path:
@@ -31,7 +33,7 @@ class AppConfig:
     screenshot_height: int = 520
     tesseract_cmd: str = "tesseract"
     ocr_install_dir: str = ""
-    ocr_download_url: str = "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download/ocr/tesseract-win64-chi-sim.zip"
+    ocr_download_url: str = f"{RELEASE_REPO_DOWNLOAD_BASE}/ocr/tesseract-win64-chi-sim.zip"
     ocr_languages: str = "chi_sim+eng"
     ocr_psm: int = 6
     font_size: int = 15
@@ -43,7 +45,7 @@ class AppConfig:
     visible_columns: list[str] = field(
         default_factory=lambda: ["序号", "物品", "价格", "单位", "走势", "记录", "来源", "更新时间", "收藏"]
     )
-    update_manifest: str = "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download/latest/latest.json"
+    update_manifest: str = f"{RELEASE_REPO_DOWNLOAD_BASE}/latest/latest.json"
     hotkeys: HotkeyConfig = field(default_factory=HotkeyConfig)
 
     @property
@@ -93,9 +95,9 @@ def load_config() -> AppConfig:
         loaded.font_size = 15
     if loaded.page_size == 50:
         loaded.page_size = 25
-    if "digi.bib.uni-mannheim.de" in loaded.ocr_download_url:
+    if "digi.bib.uni-mannheim.de" in loaded.ocr_download_url or SOURCE_REPO_DOWNLOAD_BASE in loaded.ocr_download_url:
         loaded.ocr_download_url = config.ocr_download_url
-    if not loaded.update_manifest.strip():
+    if not loaded.update_manifest.strip() or SOURCE_REPO_DOWNLOAD_BASE in loaded.update_manifest:
         loaded.update_manifest = config.update_manifest
     if loaded.tesseract_cmd.strip() == "":
         loaded.tesseract_cmd = config.tesseract_cmd

@@ -41,7 +41,7 @@ OCR 默认使用本地 Tesseract。程序会优先查找已配置路径、打包
 默认 OCR 包地址指向本项目 Gitee release 附件：
 
 ```text
-https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download/ocr/tesseract-win64-chi-sim.zip
+https://gitee.com/BiGDoGaaa/poe2-price-tracker-release/releases/download/ocr/tesseract-win64-chi-sim.zip
 ```
 
 OCR 二进制不提交到源码仓库。发布 OCR 包时，zip 内需要包含 `tesseract.exe`，程序会自动递归查找并配置。
@@ -101,7 +101,7 @@ installer\PoE2PriceTracker.iss
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make_release.ps1 `
-  -Version 0.2.4 `
-  -AppName PoE2PriceTracker-0.2.4 `
-  -DownloadBaseUrl "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download/v0.2.4"
+  -Version 0.2.6 `
+  -AppName PoE2PriceTracker-0.2.6 `
+  -DownloadBaseUrl "https://gitee.com/BiGDoGaaa/poe2-price-tracker-release/releases/download/latest"
 ```
