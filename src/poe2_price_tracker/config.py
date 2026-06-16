@@ -30,6 +30,7 @@ class AppConfig:
     screenshot_width: int = 760
     screenshot_height: int = 520
     tesseract_cmd: str = "tesseract"
+    ocr_install_dir: str = ""
     ocr_download_url: str = "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download/ocr/tesseract-win64-chi-sim.zip"
     ocr_languages: str = "chi_sim+eng"
     ocr_psm: int = 6
@@ -96,6 +97,8 @@ def load_config() -> AppConfig:
         loaded.ocr_download_url = config.ocr_download_url
     if not loaded.update_manifest.strip():
         loaded.update_manifest = config.update_manifest
+    if loaded.tesseract_cmd.strip() == "":
+        loaded.tesseract_cmd = config.tesseract_cmd
     ensure_dirs(loaded)
     save_config(loaded)
     return loaded

@@ -21,17 +21,27 @@ class TesseractOcr:
         self.languages = languages
         self.psm = psm
 
+    @staticmethod
+    def _candidate_from_path(value: str) -> list[str]:
+        if not value.strip():
+            return []
+        path = Path(value)
+        if path.is_dir():
+            return [str(path / "tesseract.exe"), *[str(match) for match in path.rglob("tesseract.exe")]]
+        return [value]
+
     def resolved_command(self) -> str | None:
         bundle_roots = []
         if hasattr(sys, "_MEIPASS"):
             bundle_roots.append(Path(sys._MEIPASS))  # type: ignore[attr-defined]
         bundle_roots.append(Path(sys.executable).resolve().parent)
         candidates = [
+            *self._candidate_from_path(self.command),
             *[
                 str(root / "ocr" / "tesseract" / "tesseract.exe")
                 for root in bundle_roots
             ],
-            self.command,
+            "tesseract",
             r"C:\Program Files\Tesseract-OCR\tesseract.exe",
             r"C:\Program Files (x86)\Tesseract-OCR\tesseract.exe",
         ]
@@ -53,7 +63,7 @@ class TesseractOcr:
                 text="",
                 engine="tesseract",
                 ok=False,
-                message="未找到本地 OCR。请安装 Tesseract 中文语言包，软件会自动识别常见安装路径。",
+                message="未找到本地 OCR。请在配置中选择 Tesseract 目录，或点击“自动准备 OCR”。",
             )
 
         cmd = [

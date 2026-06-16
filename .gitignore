@@ -32,6 +32,8 @@ tmp_ocr/
 
 # Bundled OCR binaries should be published as release assets, not source
 tools/ocr/
+Tesseract/
+Tesseract安装后/
 
 # IDE and OS files
 .idea/

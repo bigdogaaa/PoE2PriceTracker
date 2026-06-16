@@ -1,5 +1,5 @@
 #define MyAppName "PoE2 Price Tracker"
-#define MyAppVersion "0.1.0"
+#define MyAppVersion "0.2.5"
 #define MyAppPublisher "Local"
 #define MyAppExeName "PoE2PriceTracker.exe"
 

@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import shutil
 import subprocess
 import urllib.request
 import zipfile
@@ -37,7 +36,7 @@ def _local_name(url: str) -> str:
     return name or "ocr-package"
 
 
-def _find_tesseract(root: Path) -> Path | None:
+def find_tesseract(root: Path) -> Path | None:
     direct = root / "tesseract.exe"
     if direct.exists():
         return direct
@@ -58,12 +57,10 @@ def _ensure_language_files(tessdata: Path, progress=None) -> None:
 
 
 def _install_from_zip(package: Path, install_dir: Path, progress=None) -> OcrSetupResult:
-    if install_dir.exists():
-        shutil.rmtree(install_dir)
     install_dir.mkdir(parents=True, exist_ok=True)
     with zipfile.ZipFile(package) as archive:
         archive.extractall(install_dir)
-    tesseract_path = _find_tesseract(install_dir)
+    tesseract_path = find_tesseract(install_dir)
     if not tesseract_path:
         return OcrSetupResult(False, install_dir / "tesseract.exe", "OCR 压缩包中未找到 tesseract.exe。")
     _ensure_language_files(tesseract_path.parent / "tessdata", progress)
@@ -89,13 +86,18 @@ def _install_from_exe(installer: Path, install_dir: Path, progress=None) -> OcrS
     return OcrSetupResult(True, tesseract_path, "OCR 已自动下载并配置完成。")
 
 
-def prepare_tesseract_ocr(data_dir: Path, package_url: str, progress=None) -> OcrSetupResult:
+def prepare_tesseract_ocr(
+    data_dir: Path,
+    package_url: str,
+    progress=None,
+    install_dir: Path | None = None,
+) -> OcrSetupResult:
     if not package_url.strip():
         return OcrSetupResult(False, Path(), "未配置 OCR 下载地址。")
 
     ocr_root = data_dir / "ocr"
-    install_dir = ocr_root / "tesseract"
-    existing = _find_tesseract(install_dir)
+    install_dir = install_dir or (ocr_root / "tesseract")
+    existing = find_tesseract(install_dir)
     if existing:
         return OcrSetupResult(True, existing, "OCR 已准备好。")
 

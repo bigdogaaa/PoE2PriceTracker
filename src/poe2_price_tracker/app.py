@@ -49,7 +49,7 @@ from .currencies import BASE_CURRENCIES
 from .db import PriceDatabase, PriceStats, convert_amount
 from .hotkeys import GlobalHotkeys, parse_hotkey
 from .ocr import TesseractOcr
-from .ocr_setup import prepare_tesseract_ocr
+from .ocr_setup import find_tesseract, prepare_tesseract_ocr
 from .parser import ParsedItemPrice, ParsedPrice, find_number, meaningful_lines, parse_item_price_rows, parse_ocr_text
 from .poe2db_sync import fetch_all_economy_prices
 from .screenshot import capture_around_cursor, capture_full_screen, crop_image, prepare_image_for_ocr
@@ -275,7 +275,6 @@ class SettingsDialog:
         if len({hotkey.lower() for hotkey in hotkeys}) != len(hotkeys):
             messagebox.showwarning("快捷键重复", "三个快捷键不能重复。", parent=self.window)
             return
-        self.config.tesseract_cmd = "tesseract"
         self.config.ocr_languages = "chi_sim+eng"
         self.config.ocr_psm = 6
         self.config.hotkeys.lookup_hovered = hotkeys[0]
@@ -825,6 +824,8 @@ class PriceTrackerApp:
         self.settings_width_var = StringVar(value=str(self.config.screenshot_width))
         self.settings_height_var = StringVar(value=str(self.config.screenshot_height))
         self.settings_manifest_var = StringVar(value=self.config.update_manifest)
+        self.ocr_install_dir_var = StringVar(value=self.config.ocr_install_dir)
+        self.ocr_command_var = StringVar(value=self.config.tesseract_cmd)
         self.manual_item_var = StringVar()
         self.manual_amount_var = StringVar()
         self.manual_currency_var = StringVar(value="崇高石")
@@ -1137,11 +1138,21 @@ class PriceTrackerApp:
         ocr_box.pack(fill=X, pady=(16, 0))
         Label(
             ocr_box,
-            text="截图识别需要本地 OCR。可自动下载到软件数据目录并配置，不需要安装 Python。",
+            text="截图识别使用本地 Tesseract。可选择已安装目录；不选择时会自动下载到软件数据目录。",
             foreground="#607080",
             wraplength=760,
-        ).pack(side=LEFT, fill=X, expand=True)
-        Button(ocr_box, text="自动准备 OCR", command=self.prepare_ocr_runtime).pack(side=RIGHT, padx=(12, 0))
+        ).pack(anchor="w")
+        ocr_dir_row = Frame(ocr_box)
+        ocr_dir_row.pack(fill=X, pady=(10, 0))
+        Label(ocr_dir_row, text="OCR 目录", width=10, anchor="w").pack(side=LEFT)
+        Entry(ocr_dir_row, textvariable=self.ocr_install_dir_var).pack(side=LEFT, fill=X, expand=True)
+        Button(ocr_dir_row, text="选择目录", command=self.choose_ocr_install_dir).pack(side=LEFT, padx=(8, 0))
+        Button(ocr_dir_row, text="自动准备", command=self.prepare_ocr_runtime).pack(side=LEFT, padx=(8, 0))
+        self.ocr_install_dir_var.trace_add("write", lambda *_args: self.save_ocr_settings())
+        ocr_cmd_row = Frame(ocr_box)
+        ocr_cmd_row.pack(fill=X, pady=(8, 0))
+        Label(ocr_cmd_row, text="当前程序", width=10, anchor="w").pack(side=LEFT)
+        Entry(ocr_cmd_row, textvariable=self.ocr_command_var, state="readonly").pack(side=LEFT, fill=X, expand=True)
 
         danger_box = LabelFrame(self.content, text="数据", padx=14, pady=12)
         danger_box.pack(fill=X, pady=(16, 0))
@@ -1186,6 +1197,27 @@ class PriceTrackerApp:
         self._configure_style()
         self.status_var.set("配置已自动保存。")
 
+    def choose_ocr_install_dir(self) -> None:
+        initial = self.ocr_install_dir_var.get().strip() or str(self.config.data_path)
+        selected = filedialog.askdirectory(title="选择 OCR 目录", initialdir=initial)
+        if selected:
+            self.ocr_install_dir_var.set(selected)
+
+    def save_ocr_settings(self) -> None:
+        directory = self.ocr_install_dir_var.get().strip()
+        self.config.ocr_install_dir = directory
+        found = find_tesseract(Path(directory)) if directory else None
+        if found:
+            self.config.tesseract_cmd = str(found)
+            self.ocr_command_var.set(str(found))
+            self.ocr = TesseractOcr(
+                self.config.tesseract_cmd,
+                self.config.ocr_languages,
+                self.config.ocr_psm,
+            )
+            self.status_var.set("OCR 目录已保存并生效。")
+        save_config(self.config)
+
     def save_window_behavior_settings(self) -> None:
         self.config.minimize_action = self._window_action_value(self.minimize_action_var.get(), "minimize")
         self.config.close_action = self._window_action_value(self.close_action_var.get(), "close")
@@ -1195,6 +1227,7 @@ class PriceTrackerApp:
     def prepare_ocr_runtime(self) -> None:
         if getattr(self, "ocr_preparing", False):
             return
+        self.save_ocr_settings()
         self.ocr_preparing = True
         self.progress.configure(mode="determinate", maximum=100, value=0)
         self.progress_var.set("正在准备 OCR...")
@@ -1206,10 +1239,12 @@ class PriceTrackerApp:
             self.events.put(("ocr_progress", percent, url))
 
         try:
+            install_dir = Path(self.config.ocr_install_dir) if self.config.ocr_install_dir.strip() else None
             result = prepare_tesseract_ocr(
                 self.config.data_path,
                 self.config.ocr_download_url,
                 progress=progress,
+                install_dir=install_dir,
             )
             self.events.put(("ocr_done", result.ok, str(result.tesseract_path), result.message))
         except Exception as exc:
@@ -1765,7 +1800,10 @@ class PriceTrackerApp:
                     self.progress.configure(mode="indeterminate", value=0)
                     if ok:
                         self.config.tesseract_cmd = tesseract_path
+                        self.config.ocr_install_dir = str(Path(tesseract_path).parent)
                         self.config.ocr_languages = "chi_sim+eng"
+                        self.ocr_install_dir_var.set(self.config.ocr_install_dir)
+                        self.ocr_command_var.set(tesseract_path)
                         save_config(self.config)
                         self.ocr = TesseractOcr(
                             self.config.tesseract_cmd,
