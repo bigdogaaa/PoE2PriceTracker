@@ -56,6 +56,30 @@ class TesseractOcr:
     def available(self) -> bool:
         return self.resolved_command() is not None
 
+    @staticmethod
+    def _tessdata_dir(command: str) -> Path | None:
+        path = Path(command)
+        candidates = [
+            path.parent / "tessdata",
+            path.parent.parent / "tessdata",
+        ]
+        for candidate in candidates:
+            if (candidate / "chi_sim.traineddata").exists() and (candidate / "eng.traineddata").exists():
+                return candidate
+        return None
+
+    @staticmethod
+    def _windows_startup_kwargs() -> dict:
+        if sys.platform != "win32":
+            return {}
+        startupinfo = subprocess.STARTUPINFO()
+        startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+        startupinfo.wShowWindow = 0
+        return {
+            "startupinfo": startupinfo,
+            "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+        }
+
     def recognize(self, image_path: Path) -> OcrResult:
         resolved = self.resolved_command()
         if not resolved:
@@ -66,10 +90,17 @@ class TesseractOcr:
                 message="未找到本地 OCR。请在配置中选择 Tesseract 目录，或点击“自动准备 OCR”。",
             )
 
+        tessdata_dir = self._tessdata_dir(resolved)
+        cwd = str(Path(resolved).parent) if tessdata_dir else None
+        tessdata_arg = "tessdata" if tessdata_dir and tessdata_dir.parent == Path(resolved).parent else str(tessdata_dir)
         cmd = [
             resolved,
             str(image_path),
             "stdout",
+        ]
+        if tessdata_dir:
+            cmd.extend(["--tessdata-dir", tessdata_arg])
+        cmd.extend([
             "--psm",
             str(self.psm),
             "--oem",
@@ -78,7 +109,7 @@ class TesseractOcr:
             self.languages,
             "-c",
             "preserve_interword_spaces=1",
-        ]
+        ])
         try:
             completed = subprocess.run(
                 cmd,
@@ -88,6 +119,8 @@ class TesseractOcr:
                 encoding="utf-8",
                 errors="replace",
                 timeout=8,
+                cwd=cwd,
+                **self._windows_startup_kwargs(),
             )
         except Exception as exc:
             return OcrResult("", "tesseract", False, str(exc))

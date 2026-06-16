@@ -10,6 +10,11 @@ from urllib.parse import urlparse
 
 GITHUB_TESSDATA_BASE = "https://raw.githubusercontent.com/tesseract-ocr/tessdata/main"
 LANGUAGE_FILES = ("eng.traineddata", "chi_sim.traineddata", "osd.traineddata")
+MIN_LANGUAGE_FILE_SIZES = {
+    "eng.traineddata": 10_000_000,
+    "chi_sim.traineddata": 20_000_000,
+    "osd.traineddata": 5_000_000,
+}
 
 
 @dataclass(frozen=True)
@@ -48,12 +53,34 @@ def _ensure_language_files(tessdata: Path, progress=None) -> None:
     tessdata.mkdir(parents=True, exist_ok=True)
     for name in LANGUAGE_FILES:
         target = tessdata / name
-        if target.exists():
+        min_size = MIN_LANGUAGE_FILE_SIZES.get(name, 1)
+        if target.exists() and target.stat().st_size >= min_size:
             continue
         url = f"{GITHUB_TESSDATA_BASE}/{name}"
         if progress:
             progress(0, url)
         _download(url, target, progress)
+
+
+def _language_files_ready(tessdata: Path) -> bool:
+    return all(
+        (tessdata / name).exists() and (tessdata / name).stat().st_size >= MIN_LANGUAGE_FILE_SIZES[name]
+        for name in LANGUAGE_FILES
+    )
+
+
+def _windows_startup_kwargs() -> dict:
+    import sys
+
+    if sys.platform != "win32":
+        return {}
+    startupinfo = subprocess.STARTUPINFO()
+    startupinfo.dwFlags |= subprocess.STARTF_USESHOWWINDOW
+    startupinfo.wShowWindow = 0
+    return {
+        "startupinfo": startupinfo,
+        "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    }
 
 
 def _install_from_zip(package: Path, install_dir: Path, progress=None) -> OcrSetupResult:
@@ -75,6 +102,7 @@ def _install_from_exe(installer: Path, install_dir: Path, progress=None) -> OcrS
         capture_output=True,
         text=True,
         timeout=180,
+        **_windows_startup_kwargs(),
     )
     tesseract_path = install_dir / "tesseract.exe"
     if completed.returncode != 0:
@@ -98,7 +126,7 @@ def prepare_tesseract_ocr(
     ocr_root = data_dir / "ocr"
     install_dir = install_dir or (ocr_root / "tesseract")
     existing = find_tesseract(install_dir)
-    if existing:
+    if existing and _language_files_ready(existing.parent / "tessdata"):
         return OcrSetupResult(True, existing, "OCR 已准备好。")
 
     package = ocr_root / "downloads" / _local_name(package_url)
