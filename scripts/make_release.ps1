@@ -1,6 +1,7 @@
 param(
     [string]$Version = "0.1.0",
-    [string]$AppName = "PoE2PriceTracker"
+    [string]$AppName = "PoE2PriceTracker",
+    [string]$DownloadBaseUrl = ""
 )
 
 $ErrorActionPreference = "Stop"
@@ -34,9 +35,14 @@ else {
 }
 $Hash = (Get-FileHash $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
 
+$DownloadUrl = (Resolve-Path $ZipPath).Path
+if ($DownloadBaseUrl.Trim()) {
+    $DownloadUrl = $DownloadBaseUrl.TrimEnd("/") + "/" + (Split-Path -Leaf $ZipPath)
+}
+
 $Manifest = @{
     version = $Version
-    download_url = (Resolve-Path $ZipPath).Path
+    download_url = $DownloadUrl
     sha256 = $Hash
 } | ConvertTo-Json
 

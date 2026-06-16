@@ -36,7 +36,15 @@ python -m venv .venv
 
 OCR 默认使用本地 Tesseract。程序会优先查找已配置路径、打包内置路径、系统常见安装路径。
 
-在「配置」页可以点击「自动准备 OCR」：程序会把 Tesseract 下载到本机软件数据目录，下载中文简体与英文语言包，并自动写入配置。OCR 二进制不提交到源码仓库，正式发布时建议作为 release 资产或由程序首次运行时下载。
+在「配置」页可以点击「自动准备 OCR」：程序会从配置的 OCR 包地址下载到本机软件数据目录，自动解压或静默安装，并补齐中文简体与英文语言包。
+
+默认 OCR 包地址指向本项目 Gitee release 附件：
+
+```text
+https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download/ocr/tesseract-win64-chi-sim.zip
+```
+
+OCR 二进制不提交到源码仓库。发布 OCR 包时，zip 内需要包含 `tesseract.exe`，程序会自动递归查找并配置。
 
 ## 数据位置
 
@@ -77,7 +85,7 @@ installer\PoE2PriceTracker.iss
 
 ## 更新
 
-应用内预留了“检查更新”入口，读取配置里的 `update_manifest`。它支持本地路径或 HTTP(S) manifest，manifest 格式见：
+应用内“检查更新”会读取配置里的 `update_manifest`。它支持本地路径或 HTTP(S) manifest，manifest 格式见：
 
 ```json
 {
@@ -87,4 +95,13 @@ installer\PoE2PriceTracker.iss
 }
 ```
 
-第一版只做提醒和打开下载地址，不做静默自替换，避免更新器误删正在运行的 exe。
+更新流程：检查版本、下载 zip、校验 sha256、解压到本机更新目录，然后提示启动新版并退出当前版本。它不会覆盖正在运行的 exe。
+
+正式发布到 Gitee release 时，可以生成带公开下载地址的 manifest：
+
+```powershell
+powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make_release.ps1 `
+  -Version 0.2.4 `
+  -AppName PoE2PriceTracker-0.2.4 `
+  -DownloadBaseUrl "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download/v0.2.4"
+```

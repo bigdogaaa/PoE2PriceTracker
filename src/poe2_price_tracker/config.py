@@ -30,19 +30,19 @@ class AppConfig:
     screenshot_width: int = 760
     screenshot_height: int = 520
     tesseract_cmd: str = "tesseract"
-    ocr_download_url: str = "https://digi.bib.uni-mannheim.de/tesseract/tesseract-ocr-w64-setup-5.4.0.20240606.exe"
+    ocr_download_url: str = "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download/ocr/tesseract-win64-chi-sim.zip"
     ocr_languages: str = "chi_sim+eng"
     ocr_psm: int = 6
     font_size: int = 15
     display_currency: str = "神圣石"
-    page_size: int = 50
+    page_size: int = 25
     manual_add_favorite: bool = True
     minimize_action: str = "ask"
     close_action: str = "ask"
     visible_columns: list[str] = field(
         default_factory=lambda: ["序号", "物品", "价格", "单位", "走势", "记录", "来源", "更新时间", "收藏"]
     )
-    update_manifest: str = ""
+    update_manifest: str = "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download/latest/latest.json"
     hotkeys: HotkeyConfig = field(default_factory=HotkeyConfig)
 
     @property
@@ -90,6 +90,12 @@ def load_config() -> AppConfig:
         loaded.hotkeys.focus_search = "F3"
     if loaded.font_size < 15:
         loaded.font_size = 15
+    if loaded.page_size == 50:
+        loaded.page_size = 25
+    if "digi.bib.uni-mannheim.de" in loaded.ocr_download_url:
+        loaded.ocr_download_url = config.ocr_download_url
+    if not loaded.update_manifest.strip():
+        loaded.update_manifest = config.update_manifest
     ensure_dirs(loaded)
     save_config(loaded)
     return loaded

@@ -2,8 +2,8 @@ from __future__ import annotations
 
 import queue
 import ctypes
+import subprocess
 import threading
-import webbrowser
 from datetime import datetime
 from pathlib import Path
 from tkinter import (
@@ -53,7 +53,7 @@ from .ocr_setup import prepare_tesseract_ocr
 from .parser import ParsedItemPrice, ParsedPrice, find_number, meaningful_lines, parse_item_price_rows, parse_ocr_text
 from .poe2db_sync import fetch_all_economy_prices
 from .screenshot import capture_around_cursor, capture_full_screen, crop_image, prepare_image_for_ocr
-from .updater import check_update
+from .updater import UpdateInfo, check_update, download_update
 
 
 class ConfirmPriceDialog:
@@ -776,6 +776,7 @@ class PriceTrackerApp:
         self.progress_var = StringVar(value="就绪")
         self.tray_icon = None
         self.syncing = False
+        self.updating = False
         self.page_var = StringVar(value="1")
         self.page_size_var = StringVar(value=str(self.config.page_size))
         self.display_currency_var = StringVar(value=self.config.display_currency)
@@ -808,9 +809,11 @@ class PriceTrackerApp:
         except Exception:
             pass
         size = int(getattr(self.config, "font_size", 13))
-        rowheight = max(64, size * 3 + 20)
+        rowheight = max(72, size * 3 + 26)
         style.configure("Treeview", rowheight=rowheight, font=("Microsoft YaHei UI", size))
         style.configure("Treeview.Heading", font=("Microsoft YaHei UI", size, "bold"))
+        style.configure("Market.Treeview", rowheight=rowheight, font=("Microsoft YaHei UI", size))
+        style.configure("Market.Treeview.Heading", font=("Microsoft YaHei UI", size, "bold"))
         style.configure("TNotebook.Tab", padding=(16, 8))
 
     def _build_menu(self) -> None:
@@ -992,7 +995,13 @@ class PriceTrackerApp:
         columns = ("index", "item", "price", "currency", "trend", "count", "source", "updated", "favorite")
         table_box = Frame(self.content)
         table_box.pack(fill=BOTH, expand=True)
-        self.market_tree = ttk.Treeview(table_box, columns=columns, show="headings", selectmode="browse")
+        self.market_tree = ttk.Treeview(
+            table_box,
+            columns=columns,
+            show="headings",
+            selectmode="browse",
+            style="Market.Treeview",
+        )
         y_scroll = ttk.Scrollbar(table_box, orient="vertical", command=self._market_tree_yview)
         x_scroll = ttk.Scrollbar(table_box, orient="horizontal", command=self._market_tree_xview)
         self.market_tree.configure(
@@ -1025,6 +1034,7 @@ class PriceTrackerApp:
             self.market_tree.heading(key, text=headings[key], command=lambda k=key: self.sort_by_column(k))
             anchor = "center" if key in {"index", "favorite", "count"} else "w"
             self.market_tree.column(key, width=widths[key], anchor=anchor)
+        self.market_tree.tag_configure("pinned", background="#fff7d6")
         self.market_tree.grid(row=0, column=0, sticky="nsew")
         y_scroll.grid(row=0, column=1, sticky="ns")
         x_scroll.grid(row=1, column=0, sticky="ew")
@@ -1050,6 +1060,7 @@ class PriceTrackerApp:
         Button(footer, text="显示列", command=self.open_column_settings).pack(side=LEFT, padx=(18, 0))
         Button(footer, text="刷新", command=self.refresh_market_table).pack(side=LEFT, padx=(8, 0))
         self.refresh_market_table()
+        self.root.after(280, self._settle_market_layout)
 
     def show_settings_page(self) -> None:
         self._clear_content()
@@ -1381,14 +1392,23 @@ class PriceTrackerApp:
                     self._format_time(row.latest_at),
                     ("置 " if row.pinned else "") + ("★" if row.favorite else "☆"),
                 ),
+                tags=("pinned",) if row.pinned else (),
             )
             history = [record.amount for record in self.db.get_price_history(row.item_name, limit=8)]
             self.trend_data[row.item_name] = (history, row.trend_percent)
         self._apply_visible_columns()
         self.root.update_idletasks()
         self._auto_fit_market_columns()
-        self._schedule_trend_render(120)
+        self._schedule_trend_render(260)
         self.status_var.set(f"共 {total} 条记录，第 {page}/{max_page} 页")
+
+    def _settle_market_layout(self) -> None:
+        if not self._has_market_tree():
+            return
+        self._configure_style()
+        self.root.update_idletasks()
+        self._auto_fit_market_columns()
+        self._schedule_trend_render(180)
 
     def _market_sort_key(self, row, target_currency: str, rate: float):
         column = self.sort_column
@@ -1478,7 +1498,9 @@ class PriceTrackerApp:
                 continue
             x, y, width, height = bbox
             values, percent = self.trend_data.get(iid, ([], ""))
-            canvas = Canvas(self.market_tree, width=width - 6, height=height - 6, highlightthickness=0, bg="#ffffff")
+            tags = self.market_tree.item(iid, "tags")
+            bg = "#fff7d6" if "pinned" in tags else "#ffffff"
+            canvas = Canvas(self.market_tree, width=width - 6, height=height - 6, highlightthickness=0, bg=bg)
             canvas.place(x=x + 3, y=y + 3)
             self._draw_trend(canvas, values, percent, width - 6, height - 6)
             self.trend_widgets.append(canvas)
@@ -1756,6 +1778,25 @@ class PriceTrackerApp:
                     else:
                         self.progress_var.set("OCR 准备失败")
                         messagebox.showerror("OCR 准备失败", message)
+                elif isinstance(event, tuple) and event[0] == "update_progress":
+                    _kind, percent, url = event
+                    self.progress.configure(mode="determinate", maximum=100, value=percent)
+                    self.progress_var.set(f"更新下载中 {percent}%：{url}")
+                elif isinstance(event, tuple) and event[0] == "update_done":
+                    _kind, ok, executable_path, message = event
+                    self.updating = False
+                    self.progress.configure(mode="indeterminate", value=0)
+                    if ok and executable_path:
+                        self.progress_var.set("更新已下载")
+                        if messagebox.askyesno("更新完成", f"{message}\n\n现在启动新版并退出当前版本？"):
+                            subprocess.Popen([executable_path], close_fds=True)
+                            self.exit_app()
+                    elif ok:
+                        self.progress_var.set("更新已下载")
+                        messagebox.showinfo("更新完成", message)
+                    else:
+                        self.progress_var.set("更新失败")
+                        messagebox.showerror("更新失败", message)
                 elif event == "open_workbench":
                     self.start_area_capture()
                 elif event == "capture_price":
@@ -2049,18 +2090,46 @@ class PriceTrackerApp:
         self.status_var.set(f"设置已加载。数据目录：{self.config.data_path}")
 
     def check_for_updates(self) -> None:
+        if self.updating:
+            self.progress_var.set("更新正在进行中，请稍候...")
+            return
         info = check_update(self.config.update_manifest)
         if info.available and info.download_url:
             if messagebox.askyesno(
                 "发现更新",
-                f"{info.message}\n当前版本：{info.current_version}\n最新版本：{info.latest_version}\n\n打开下载地址？",
+                f"{info.message}\n当前：{info.current_version}\n最新：{info.latest_version}\n\n下载并安装？",
             ):
-                webbrowser.open(info.download_url)
+                self.updating = True
+                self.progress.configure(mode="determinate", maximum=100, value=0)
+                self.progress_var.set("正在下载更新...")
+                threading.Thread(target=self._download_update_worker, args=(info,), daemon=True).start()
             return
         messagebox.showinfo(
             "检查更新",
             f"{info.message}\n当前版本：{info.current_version}\n最新版本：{info.latest_version}",
         )
+
+    def _download_update_worker(self, info: UpdateInfo) -> None:
+        def progress(percent: int, url: str) -> None:
+            self.events.put(("update_progress", percent, url))
+
+        try:
+            result = download_update(
+                self.config.update_manifest,
+                info,
+                self.config.data_path / "updates",
+                progress=progress,
+            )
+            self.events.put(
+                (
+                    "update_done",
+                    True,
+                    "" if result.executable_path is None else str(result.executable_path),
+                    result.message,
+                )
+            )
+        except Exception as exc:
+            self.events.put(("update_done", False, "", str(exc)))
 
     def sync_poe2db_currency(self) -> None:
         if self.syncing:
