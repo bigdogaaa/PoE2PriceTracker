@@ -1,0 +1,41 @@
+# Python caches
+__pycache__/
+*.py[cod]
+*$py.class
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+
+# Virtual environments
+.venv/
+.build-venv/
+venv/
+env/
+
+# Build outputs
+build/
+dist/
+release/
+*.spec
+*.zip
+*.exe
+*.msi
+
+# Local runtime data
+*.sqlite3
+*.sqlite3-*
+screenshots/
+tmp_ocr/
+.tmp-*/
+.tmp-*
+*.log
+
+# Bundled OCR binaries should be published as release assets, not source
+tools/ocr/
+
+# IDE and OS files
+.idea/
+.vscode/
+*.swp
+Thumbs.db
+Desktop.ini
