@@ -34,13 +34,31 @@ def enhance_for_ocr(image: Image.Image) -> Image.Image:
     return resized.filter(ImageFilter.SHARPEN)
 
 
-def prepare_image_for_ocr(source_path: Path, output_dir: Path, prefix: str = "ocr") -> Path:
+def prune_screenshots(output_dir: Path, max_count: int = 20) -> None:
+    try:
+        max_count = max(1, int(max_count))
+        images = sorted(
+            [path for path in output_dir.glob("*.png") if path.is_file()],
+            key=lambda path: (path.stat().st_mtime, path.name),
+            reverse=True,
+        )
+    except Exception:
+        return
+    for old_path in images[max_count:]:
+        try:
+            old_path.unlink(missing_ok=True)
+        except Exception:
+            continue
+
+
+def prepare_image_for_ocr(source_path: Path, output_dir: Path, prefix: str = "ocr", max_files: int = 20) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     image = Image.open(source_path)
     enhanced = enhance_for_ocr(image)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = output_dir / f"{prefix}-{stamp}.png"
     enhanced.save(path)
+    prune_screenshots(output_dir, max_files)
     return path
 
 
@@ -49,6 +67,7 @@ def capture_around_cursor(
     width: int,
     height: int,
     prefix: str = "capture",
+    max_files: int = 20,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     cursor = get_cursor_position()
@@ -60,15 +79,17 @@ def capture_around_cursor(
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = output_dir / f"{prefix}-{stamp}.png"
     enhanced.save(path)
+    prune_screenshots(output_dir, max_files)
     return path
 
 
-def capture_full_screen(output_dir: Path, prefix: str = "screen") -> Path:
+def capture_full_screen(output_dir: Path, prefix: str = "screen", max_files: int = 20) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     image = ImageGrab.grab(all_screens=True)
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = output_dir / f"{prefix}-{stamp}.png"
     image.save(path)
+    prune_screenshots(output_dir, max_files)
     return path
 
 
@@ -78,6 +99,7 @@ def crop_image(
     output_dir: Path,
     prefix: str,
     enhance: bool = True,
+    max_files: int = 20,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     image = Image.open(source_path)
@@ -91,4 +113,5 @@ def crop_image(
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = output_dir / f"{prefix}-{stamp}.png"
     output.save(path)
+    prune_screenshots(output_dir, max_files)
     return path

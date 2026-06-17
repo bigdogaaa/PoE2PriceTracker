@@ -15,6 +15,34 @@ def normalize_name(name: str) -> str:
     return " ".join(name.strip().lower().split())
 
 
+def compact_name(name: str) -> str:
+    return "".join(ch for ch in normalize_name(name) if ch.isalnum())
+
+
+def edit_distance_at_most_one(left: str, right: str) -> bool:
+    left = compact_name(left)
+    right = compact_name(right)
+    if left == right:
+        return True
+    if abs(len(left) - len(right)) > 1:
+        return False
+    if len(left) == len(right):
+        return sum(a != b for a, b in zip(left, right)) <= 1
+    if len(left) > len(right):
+        left, right = right, left
+    i = j = edits = 0
+    while i < len(left) and j < len(right):
+        if left[i] == right[j]:
+            i += 1
+            j += 1
+            continue
+        edits += 1
+        if edits > 1:
+            return False
+        j += 1
+    return True
+
+
 def search_terms(query: str) -> list[str]:
     return [term for term in normalize_name(query).split(" ") if term]
 
@@ -318,6 +346,36 @@ class PriceDatabase:
                     best_name = str(row["name"])
         if best_score < min_score:
             return query.strip(), best_score
+        return best_name, best_score
+
+    def match_item_name_strict(self, query: str, max_edits: int = 1) -> tuple[str, float]:
+        normalized = normalize_name(query)
+        if not normalized:
+            return "", 0.0
+        rows = self.conn.execute(
+            """
+            SELECT name, normalized_name FROM items
+            UNION
+            SELECT name, normalized_name FROM icon_assets WHERE kind IN ('item', 'currency')
+            """
+        ).fetchall()
+        for row in rows:
+            if normalized == str(row["normalized_name"]):
+                return str(row["name"]), 1.0
+        best_name = ""
+        best_score = 0.0
+        for row in rows:
+            candidate = str(row["normalized_name"])
+            if max_edits <= 1 and not edit_distance_at_most_one(normalized, candidate):
+                continue
+            score = SequenceMatcher(None, compact_name(normalized), compact_name(candidate)).ratio()
+            if max_edits <= 1:
+                score = max(score, 0.94)
+            if score > best_score:
+                best_score = score
+                best_name = str(row["name"])
+        if not best_name:
+            return query.strip(), 0.0
         return best_name, best_score
 
     def get_stats(self, item_name: str) -> PriceStats | None:

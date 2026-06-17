@@ -1,6 +1,6 @@
 [project]
 name = "poe2-price-tracker"
-version = "0.3.18"
+version = "0.3.19"
 description = "Local screenshot-first price tracker for Path of Exile 2."
 requires-python = ">=3.11"
 dependencies = [

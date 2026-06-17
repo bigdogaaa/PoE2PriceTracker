@@ -58,13 +58,13 @@ from . import __version__
 from .config import AppConfig, load_config, save_config
 from .currencies import BASE_CURRENCIES
 from .clipboard_parser import parse_poe_clipboard_item
-from .db import PriceDatabase, PriceStats, convert_amount, trend_percent
+from .db import MarketRow, PriceDatabase, PriceStats, convert_amount, normalize_name, trend_percent
 from .hotkeys import GlobalHotkeys, parse_hotkey
 from .ocr import RapidOcr
 from .parser import ParsedItemPrice, ParsedPrice, find_number, meaningful_lines, parse_item_price_rows, parse_ocr_text
 from .poe2db_sync import fetch_all_economy_prices
 from .screenshot import capture_around_cursor, capture_full_screen, crop_image, prepare_image_for_ocr
-from .structure import recognize_structured_prices
+from .structure import RecognizedItemCandidate, recognize_item_candidates, recognize_structured_prices
 from .updater import UpdateInfo, check_update, download_update
 
 
@@ -215,11 +215,8 @@ class SettingsDialog:
         self.window.transient(parent)
         self.window.grab_set()
 
-        self.width_var = StringVar(value=str(config.screenshot_width))
-        self.height_var = StringVar(value=str(config.screenshot_height))
         self.manifest_var = StringVar(value=config.update_manifest)
         self.lookup_hotkey_var = StringVar(value=config.hotkeys.lookup_hovered)
-        self.capture_hotkey_var = StringVar(value=config.hotkeys.capture_price)
         self.focus_hotkey_var = StringVar(value=config.hotkeys.focus_search)
         self.quick_hotkey_var = StringVar(value=config.hotkeys.quick_price)
 
@@ -232,8 +229,7 @@ class SettingsDialog:
             font=("Microsoft YaHei UI", 12, "bold"),
         ).pack(anchor="w")
         for label, variable in [
-            ("截图识别实验台", self.lookup_hotkey_var),
-            ("截图价格入库", self.capture_hotkey_var),
+            ("截图识别", self.lookup_hotkey_var),
             ("聚焦搜索框", self.focus_hotkey_var),
             ("快速查价", self.quick_hotkey_var),
         ]:
@@ -241,18 +237,6 @@ class SettingsDialog:
             row.pack(fill=X, pady=(8, 0))
             Label(row, text=label, width=16, anchor="w").pack(side=LEFT)
             HotkeyCaptureButton(row, variable).pack(side=LEFT, fill=X, expand=True)
-
-        Label(
-            body,
-            text="截图范围",
-            font=("Microsoft YaHei UI", 12, "bold"),
-        ).pack(anchor="w", pady=(18, 0))
-        size_row = Frame(body)
-        size_row.pack(fill=X, pady=(8, 0))
-        Label(size_row, text="悬停截图宽度").pack(side=LEFT)
-        Entry(size_row, textvariable=self.width_var, width=8).pack(side=LEFT, padx=(8, 18))
-        Label(size_row, text="高度").pack(side=LEFT)
-        Entry(size_row, textvariable=self.height_var, width=8).pack(side=LEFT, padx=(8, 0))
 
         Label(
             body,
@@ -271,15 +255,8 @@ class SettingsDialog:
         Button(buttons, text="取消", command=self.window.destroy).pack(side=RIGHT, padx=(0, 8))
 
     def _save(self) -> None:
-        try:
-            self.config.screenshot_width = max(120, int(self.width_var.get()))
-            self.config.screenshot_height = max(120, int(self.height_var.get()))
-        except ValueError:
-            messagebox.showwarning("设置错误", "截图宽高需要是整数。", parent=self.window)
-            return
         hotkeys = [
             self.lookup_hotkey_var.get().strip(),
-            self.capture_hotkey_var.get().strip(),
             self.focus_hotkey_var.get().strip(),
             self.quick_hotkey_var.get().strip(),
         ]
@@ -293,9 +270,8 @@ class SettingsDialog:
             messagebox.showwarning("快捷键重复", "快捷键不能重复。", parent=self.window)
             return
         self.config.hotkeys.lookup_hovered = hotkeys[0]
-        self.config.hotkeys.capture_price = hotkeys[1]
-        self.config.hotkeys.focus_search = hotkeys[2]
-        self.config.hotkeys.quick_price = hotkeys[3]
+        self.config.hotkeys.focus_search = hotkeys[1]
+        self.config.hotkeys.quick_price = hotkeys[2]
         self.config.update_manifest = self.manifest_var.get().strip()
         save_config(self.config)
         self.window.destroy()
@@ -698,12 +674,14 @@ class RegionOcrWorkbench:
             self.rectangles["item"],
             self.config.screenshots_path,
             "item-region",
+            max_files=max(1, int(getattr(self.config, "screenshot_retention_count", 20) or 20)),
         )
         price_crop = crop_image(
             self.image_path,
             self.rectangles["price"],
             self.config.screenshots_path,
             "price-region",
+            max_files=max(1, int(getattr(self.config, "screenshot_retention_count", 20) or 20)),
         )
         item_result = ocr.recognize(item_crop)
         price_result = ocr.recognize(price_crop)
@@ -814,6 +792,21 @@ class PriceTrackerApp:
         self.focus_search_result_window = None
         self.focus_search_results_scrollbar = None
         self.focus_search_job = None
+        self.screenshot_lookup_overlay = None
+        self.screenshot_lookup_outer_canvas = None
+        self.screenshot_lookup_container = None
+        self.screenshot_lookup_container_window = None
+        self.screenshot_lookup_results = None
+        self.screenshot_lookup_results_canvas = None
+        self.screenshot_lookup_result_window = None
+        self.screenshot_lookup_results_scrollbar = None
+        self.screenshot_lookup_loading_label = None
+        self.screenshot_lookup_animation_job = None
+        self.screenshot_lookup_animation_step = 0
+        self.screenshot_lookup_watch_token = 0
+        self.screenshot_lookup_drag_start: tuple[int, int, int, int] | None = None
+        self.screenshot_lookup_drag_moved = False
+        self._restore_after_area_capture = False
         self.ocr_review_rows: list[ParsedItemPrice] = []
         self.ocr_review_raw_text = ""
         self.ocr_review_image_path = Path()
@@ -866,6 +859,8 @@ class PriceTrackerApp:
         self.settings_font_var = StringVar(value=str(self.config.font_size))
         self.settings_width_var = StringVar(value=str(self.config.screenshot_width))
         self.settings_height_var = StringVar(value=str(self.config.screenshot_height))
+        self.screenshot_retention_var = StringVar(value=str(self.config.screenshot_retention_count))
+        self.show_ocr_details_var = StringVar(value="1" if self.config.show_ocr_review_details else "0")
         self.settings_manifest_var = StringVar(value=self.config.update_manifest)
         self.focus_search_shape_var = StringVar(value="圆角" if self.config.focus_search_rounded else "直角")
         self.focus_search_limit_var = StringVar(value=str(self.config.focus_search_limit))
@@ -937,6 +932,15 @@ class PriceTrackerApp:
         self.progress.configure(mode="determinate", maximum=100, value=max(0, min(100, percent)))
         self.progress_var.set(text)
 
+    def _screenshot_retention_count(self) -> int:
+        try:
+            return max(1, min(500, int(self.config.screenshot_retention_count)))
+        except (TypeError, ValueError):
+            return 20
+
+    def _should_update_ocr_review_page(self) -> bool:
+        return bool(getattr(self.config, "show_ocr_review_details", True))
+
     def _clear_content(self) -> None:
         if hasattr(self, "trend_widgets"):
             self._clear_trend_canvases()
@@ -955,14 +959,17 @@ class PriceTrackerApp:
             return False
 
     def show_market_page(self) -> None:
+        self.current_page_name = "market"
         self.current_favorites_only = False
         self._build_market_page("物价列表", favorites_only=False)
 
     def show_favorites_page(self) -> None:
+        self.current_page_name = "favorites"
         self.current_favorites_only = True
         self._build_market_page("收藏列表", favorites_only=True)
 
     def show_manual_record_page(self) -> None:
+        self.current_page_name = "manual"
         self._clear_content()
         Label(
             self.content,
@@ -1017,6 +1024,7 @@ class PriceTrackerApp:
         self.manual_currency_var.set("崇高石")
 
     def show_ocr_review_page(self) -> None:
+        self.current_page_name = "ocr"
         self._clear_content()
         Label(
             self.content,
@@ -1025,7 +1033,7 @@ class PriceTrackerApp:
         ).pack(anchor="w")
         toolbar = Frame(self.content)
         toolbar.pack(fill=X, pady=(12, 10))
-        Button(toolbar, text="开始框选截图", command=self.start_area_capture).pack(side=LEFT)
+        Button(toolbar, text="截图识别", command=lambda: self.start_area_capture(restore_after=True)).pack(side=LEFT)
         Label(toolbar, text="框选后会先显示截图，再自动识别内容。").pack(side=LEFT, padx=(12, 0))
         Button(toolbar, text="保存选中", command=self.save_selected_ocr_row).pack(side=RIGHT)
         Button(toolbar, text="保存全部", command=self.save_all_ocr_rows).pack(side=RIGHT, padx=(0, 8))
@@ -1216,9 +1224,6 @@ class PriceTrackerApp:
         self.ocr_item_var.set(row.item_name)
         self.ocr_amount_var.set(f"{row.amount:g}")
         self.ocr_currency_var.set(row.currency or "崇高石")
-        if hasattr(self, "ocr_raw_text"):
-            self.ocr_raw_text.delete("1.0", END)
-            self.ocr_raw_text.insert("1.0", row.raw_text)
 
     def apply_ocr_edit(self) -> bool:
         index = self.ocr_selected_index
@@ -1234,7 +1239,7 @@ class PriceTrackerApp:
         if not item:
             messagebox.showwarning("缺少物品", "物品名称不能为空。")
             return False
-        raw = self.ocr_raw_text.get("1.0", END).strip() if hasattr(self, "ocr_raw_text") else self.ocr_review_rows[index].raw_text
+        raw = self.ocr_review_rows[index].raw_text
         old = self.ocr_review_rows[index]
         self.ocr_review_rows[index] = ParsedItemPrice(
             item_name=item,
@@ -1309,6 +1314,7 @@ class PriceTrackerApp:
         self._save_ocr_indices(list(range(len(self.ocr_review_rows))))
 
     def _build_market_page(self, title: str, favorites_only: bool) -> None:
+        self.current_page_name = "favorites" if favorites_only else "market"
         self._clear_content()
         self.current_favorites_only = favorites_only
         header = Frame(self.content)
@@ -1437,6 +1443,7 @@ class PriceTrackerApp:
         self.root.after(280, self._settle_market_layout)
 
     def show_settings_page(self) -> None:
+        self.current_page_name = "settings"
         self._clear_content()
         holder = Frame(self.content)
         holder.pack(fill=BOTH, expand=True)
@@ -1467,7 +1474,6 @@ class PriceTrackerApp:
         left.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 10))
         for label, variable in [
             ("截图识别", StringVar(value=self.config.hotkeys.lookup_hovered)),
-            ("截图入库", StringVar(value=self.config.hotkeys.capture_price)),
             ("聚焦搜索", StringVar(value=self.config.hotkeys.focus_search)),
             ("快速查价", StringVar(value=self.config.hotkeys.quick_price)),
         ]:
@@ -1477,15 +1483,14 @@ class PriceTrackerApp:
             button = HotkeyCaptureButton(row, variable)
             button.pack(side=LEFT, fill=X, expand=True)
             if variable.get() == self.config.hotkeys.focus_search:
-                Button(row, text="Ctrl+Space", command=lambda v=variable: v.set("Ctrl+Space")).pack(side=LEFT, padx=(8, 0))
+                Button(row, text="重置", command=lambda v=variable: v.set("Ctrl+Space")).pack(side=LEFT, padx=(8, 0))
             variable.trace_add("write", lambda *_args, v=variable, n=label: self._save_hotkey_setting(n, v.get()))
 
         right = LabelFrame(grid, text="显示与截图", padx=14, pady=12)
         right.pack(side=LEFT, fill=BOTH, expand=True, padx=(10, 0))
         for label, variable in [
-            ("鼠标附近截图宽度", self.settings_width_var),
-            ("鼠标附近截图高度", self.settings_height_var),
             ("默认每页数量", self.page_size_var),
+            ("保留截图数量", self.screenshot_retention_var),
         ]:
             row = Frame(right)
             row.pack(fill=X, pady=6)
@@ -1566,6 +1571,14 @@ class PriceTrackerApp:
             offvalue="0",
             command=self.save_preload_ocr_setting,
         ).pack(anchor="w", pady=(10, 0))
+        ttk.Checkbutton(
+            ocr_box,
+            text="在截图识别页显示截图、识别文字和可保存列表",
+            variable=self.show_ocr_details_var,
+            onvalue="1",
+            offvalue="0",
+            command=self.save_ocr_details_setting,
+        ).pack(anchor="w", pady=(8, 0))
 
         danger_box = LabelFrame(body, text="数据", padx=14, pady=12)
         danger_box.pack(fill=X, pady=(16, 0))
@@ -1577,12 +1590,6 @@ class PriceTrackerApp:
         ).pack(side=LEFT, fill=X, expand=True)
         Button(danger_box, text="清空已记录数据", command=self.clear_recorded_data).pack(side=RIGHT, padx=(12, 0))
 
-        Label(
-            body,
-            text="鼠标附近截图尺寸用于旧的悬停截图入库：按快捷键时截取鼠标周围固定范围。现在主流程的框选截图不受这个尺寸影响。",
-            foreground="#777",
-            wraplength=760,
-        ).pack(anchor="w", pady=(16, 0))
         Button(body, text="退出软件", command=self.exit_app).pack(anchor="w", pady=(16, 0))
         Label(
             body,
@@ -1611,8 +1618,6 @@ class PriceTrackerApp:
             return
         if label == "截图识别":
             self.config.hotkeys.lookup_hovered = value
-        elif label == "截图入库":
-            self.config.hotkeys.capture_price = value
         elif label == "聚焦搜索":
             self.config.hotkeys.focus_search = value
         elif label == "快速查价":
@@ -1626,6 +1631,7 @@ class PriceTrackerApp:
             self.config.screenshot_height = max(120, int(self.settings_height_var.get()))
             self.config.page_size = max(10, min(500, int(self.page_size_var.get())))
             self.config.focus_search_limit = max(1, min(10, int(self.focus_search_limit_var.get())))
+            self.config.screenshot_retention_count = max(1, min(500, int(self.screenshot_retention_var.get())))
         except ValueError:
             return
         self.config.update_manifest = self.settings_manifest_var.get().strip()
@@ -1651,6 +1657,11 @@ class PriceTrackerApp:
         self.config.preload_ocr_on_start = self.preload_ocr_var.get() == "1"
         save_config(self.config)
         self.status_var.set("截图识别准备偏好已保存。")
+
+    def save_ocr_details_setting(self) -> None:
+        self.config.show_ocr_review_details = self.show_ocr_details_var.get() == "1"
+        save_config(self.config)
+        self.status_var.set("截图识别详情偏好已保存。")
 
     def save_window_behavior_settings(self) -> None:
         self.config.minimize_action = self._window_action_value(self.minimize_action_var.get(), "minimize")
@@ -2242,10 +2253,6 @@ class PriceTrackerApp:
             lambda: self.events.put("open_workbench"),
         )
         self.hotkeys.register(
-            self.config.hotkeys.capture_price,
-            lambda: self.events.put("capture_price"),
-        )
-        self.hotkeys.register(
             self.config.hotkeys.focus_search,
             lambda: self.events.put("focus_search"),
         )
@@ -2266,8 +2273,7 @@ class PriceTrackerApp:
         else:
             self.status_var.set(
                 "快捷键已加载："
-                f"查询 {self.config.hotkeys.lookup_hovered}，"
-                f"入库 {self.config.hotkeys.capture_price}，"
+                f"截图识别 {self.config.hotkeys.lookup_hovered}，"
                 f"搜索 {self.config.hotkeys.focus_search}，"
                 f"快速查价 {self.config.hotkeys.quick_price}"
             )
@@ -2310,14 +2316,45 @@ class PriceTrackerApp:
                     self.ocr_review_image_path = Path(crop_path)
                     if ok:
                         self.ocr_review_rows = rows
-                        self.show_ocr_review_page()
+                        if self._should_update_ocr_review_page():
+                            self.show_ocr_review_page()
                         self._set_progress_idle(f"截图识别完成：{len(rows)} 条。")
                         self.status_var.set(f"截图识别完成：{len(rows)} 条，请确认后保存。")
                     else:
                         self.ocr_review_rows = []
-                        self.show_ocr_review_page()
+                        if self._should_update_ocr_review_page() and getattr(self, "current_page_name", "") == "ocr":
+                            self.show_ocr_review_page()
                         self._set_progress_idle("截图识别未得到结果")
-                        messagebox.showwarning("未识别到价格列表", message)
+                        self.status_var.set(message or "截图识别未得到结果。")
+                elif isinstance(event, tuple) and event[0] == "screenshot_lookup_done":
+                    _kind, ok, rows, lookup_rows, raw_text, crop_path, message = event
+                    self._set_ocr_running_ui(False)
+                    self.ocr_review_rows = rows
+                    self.ocr_review_raw_text = raw_text
+                    self.ocr_review_image_path = Path(crop_path)
+                    self.ocr_selected_index = None
+                    if (
+                        self._should_update_ocr_review_page()
+                        and getattr(self, "current_page_name", "") == "ocr"
+                        and self._restore_after_area_capture
+                    ):
+                        self.show_ocr_review_page()
+                    elif (
+                        self._should_update_ocr_review_page()
+                        and getattr(self, "current_page_name", "") == "ocr"
+                        and self.root.state() != "withdrawn"
+                    ):
+                        self.show_ocr_review_page()
+                    self.show_screenshot_lookup_results(lookup_rows, message)
+                    if lookup_rows:
+                        self._set_progress_idle(f"截图查价完成：{len(lookup_rows)} 条。")
+                        self.status_var.set(f"截图查价完成：{len(lookup_rows)} 条。")
+                    elif ok:
+                        self._set_progress_idle("截图识别完成，但本地没有匹配价格")
+                        self.status_var.set("截图识别完成，但本地没有匹配价格。")
+                    else:
+                        self._set_progress_idle("截图识别未得到可靠结果")
+                        self.status_var.set(message or "截图识别未得到可靠结果。")
                 elif isinstance(event, tuple) and event[0] == "update_progress":
                     _kind, percent, url = event
                     self._set_progress_percent(percent, f"更新下载中 {percent}%：{url}")
@@ -2337,8 +2374,6 @@ class PriceTrackerApp:
                         messagebox.showerror("更新失败", message)
                 elif event == "open_workbench":
                     self.start_area_capture()
-                elif event == "capture_price":
-                    self.capture_price_from_screenshot()
                 elif event == "quick_price":
                     self.quick_price_from_clipboard()
                 elif event == "focus_search":
@@ -2514,6 +2549,358 @@ class PriceTrackerApp:
             try:
                 if overlay.winfo_exists():
                     overlay.destroy()
+            except Exception:
+                pass
+
+    def show_screenshot_lookup_loading(self) -> None:
+        overlay = self._ensure_screenshot_lookup_overlay()
+        if overlay is None:
+            return
+        self._clear_screenshot_lookup_results()
+        header = Frame(self.screenshot_lookup_results, bg="#ffffff", pady=4)
+        header.pack(fill=X)
+        Label(
+            header,
+            text="正在识别截图",
+            fg="#172033",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 15, "bold"),
+        ).pack(anchor="w")
+        loading = Label(
+            header,
+            text="正在分析物品区域和本地物价...",
+            fg="#7b8794",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 11),
+        )
+        loading.pack(anchor="w", pady=(6, 0))
+        self._bind_screenshot_lookup_drag_recursive(header)
+        self.screenshot_lookup_loading_label = loading
+        self._configure_screenshot_lookup_scroll(46, False)
+        self._position_screenshot_lookup_overlay(126)
+        self._animate_screenshot_lookup_loading()
+        overlay.lift()
+
+    def _ensure_screenshot_lookup_overlay(self) -> Toplevel | None:
+        if self.screenshot_lookup_overlay is not None and self._toplevel_exists(self.screenshot_lookup_overlay):
+            return self.screenshot_lookup_overlay
+        overlay = Toplevel(self.root)
+        self.screenshot_lookup_overlay = overlay
+        overlay.overrideredirect(True)
+        overlay.attributes("-topmost", True)
+        try:
+            overlay.attributes("-alpha", 0.96)
+        except Exception:
+            pass
+        transparent = "#ff00ff"
+        if self.config.focus_search_rounded:
+            overlay.configure(bg=transparent)
+            try:
+                overlay.attributes("-transparentcolor", transparent)
+            except Exception:
+                pass
+        else:
+            overlay.configure(bg="#ffffff")
+        overlay.bind("<Escape>", lambda _event: self.destroy_screenshot_lookup_overlay())
+
+        outer = Canvas(overlay, bg=transparent if self.config.focus_search_rounded else "#ffffff", highlightthickness=0)
+        outer.pack(fill=BOTH, expand=True)
+        self.screenshot_lookup_outer_canvas = outer
+        container = Frame(
+            outer,
+            bg="#ffffff",
+            padx=16,
+            pady=12,
+            highlightthickness=0 if self.config.focus_search_rounded else 1,
+            highlightbackground="#d8e1ea",
+        )
+        self.screenshot_lookup_container = container
+        self.screenshot_lookup_container_window = outer.create_window((0, 0), window=container, anchor="nw")
+        self._bind_screenshot_lookup_drag_recursive(container)
+
+        title_row = Frame(container, bg="#ffffff")
+        title_row.pack(fill=X)
+        Label(
+            title_row,
+            text="截图查价",
+            fg="#8a97a6",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 12, "bold"),
+        ).pack(side=LEFT)
+        Label(
+            title_row,
+            text="Esc 关闭",
+            fg="#b0bac5",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 10),
+        ).pack(side=RIGHT)
+
+        result_box = Frame(container, bg="#ffffff")
+        result_box.pack(fill=BOTH, expand=True, pady=(8, 0))
+        result_canvas = Canvas(result_box, bg="#ffffff", highlightthickness=0)
+        result_scrollbar = ttk.Scrollbar(result_box, orient="vertical", command=result_canvas.yview)
+        result_inner = Frame(result_canvas, bg="#ffffff")
+        result_window = result_canvas.create_window((0, 0), window=result_inner, anchor="nw")
+        result_inner.bind(
+            "<Configure>",
+            lambda _event: result_canvas.configure(scrollregion=result_canvas.bbox("all") or (0, 0, 0, 0)),
+        )
+        result_canvas.bind("<Configure>", lambda event: result_canvas.itemconfigure(result_window, width=event.width))
+        result_canvas.configure(yscrollcommand=result_scrollbar.set)
+        result_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self.screenshot_lookup_results = result_inner
+        self.screenshot_lookup_results_canvas = result_canvas
+        self.screenshot_lookup_result_window = result_window
+        self.screenshot_lookup_results_scrollbar = result_scrollbar
+        self._position_screenshot_lookup_overlay(126)
+        overlay.after(30, lambda: self._focus_screenshot_lookup_overlay(overlay))
+        return overlay
+
+    def _focus_screenshot_lookup_overlay(self, overlay: Toplevel) -> None:
+        try:
+            if overlay.winfo_exists():
+                overlay.lift()
+                overlay.focus_force()
+        except Exception:
+            pass
+
+    def _bind_screenshot_lookup_drag_recursive(self, widget) -> None:
+        try:
+            widget.bind("<ButtonPress-1>", self._start_screenshot_lookup_drag, add="+")
+            widget.bind("<B1-Motion>", self._drag_screenshot_lookup_overlay, add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_screenshot_lookup_drag_recursive(child)
+
+    def _start_screenshot_lookup_drag(self, event) -> None:
+        overlay = self.screenshot_lookup_overlay
+        if overlay is None:
+            return
+        self.screenshot_lookup_drag_moved = False
+        self.screenshot_lookup_drag_start = (event.x_root, event.y_root, overlay.winfo_x(), overlay.winfo_y())
+
+    def _drag_screenshot_lookup_overlay(self, event) -> None:
+        overlay = self.screenshot_lookup_overlay
+        start = self.screenshot_lookup_drag_start
+        if overlay is None or start is None:
+            return
+        start_x, start_y, window_x, window_y = start
+        dx = event.x_root - start_x
+        dy = event.y_root - start_y
+        if abs(dx) + abs(dy) >= 4:
+            self.screenshot_lookup_drag_moved = True
+        overlay.geometry(f"+{window_x + dx}+{window_y + dy}")
+
+    def _clear_screenshot_lookup_results(self) -> None:
+        if self.screenshot_lookup_animation_job is not None:
+            try:
+                self.root.after_cancel(self.screenshot_lookup_animation_job)
+            except Exception:
+                pass
+            self.screenshot_lookup_animation_job = None
+        self.screenshot_lookup_loading_label = None
+        if self.screenshot_lookup_results is None:
+            return
+        for child in self.screenshot_lookup_results.winfo_children():
+            child.destroy()
+
+    def _animate_screenshot_lookup_loading(self) -> None:
+        label = self.screenshot_lookup_loading_label
+        if label is None:
+            self.screenshot_lookup_animation_job = None
+            return
+        try:
+            if not label.winfo_exists():
+                self.screenshot_lookup_animation_job = None
+                return
+            dots = "." * (self.screenshot_lookup_animation_step % 4)
+            self.screenshot_lookup_animation_step += 1
+            label.configure(text=f"正在分析物品区域和本地物价{dots}")
+        except Exception:
+            self.screenshot_lookup_animation_job = None
+            return
+        self.screenshot_lookup_animation_job = self.root.after(360, self._animate_screenshot_lookup_loading)
+
+    def show_screenshot_lookup_results(self, rows: list[tuple[MarketRow, float, str]], message: str = "") -> None:
+        overlay = self._ensure_screenshot_lookup_overlay()
+        if overlay is None:
+            return
+        self._clear_screenshot_lookup_results()
+        if not rows:
+            box = Frame(self.screenshot_lookup_results, bg="#ffffff", pady=8)
+            box.pack(fill=X)
+            Label(
+                box,
+                text="没有查到可靠物品",
+                fg="#172033",
+                bg="#ffffff",
+                font=("Microsoft YaHei UI", 14, "bold"),
+            ).pack(anchor="w")
+            Label(
+                box,
+                text=message or "已把截图和识别文字放到截图识别页，可以稍后手动确认。",
+                fg="#7b8794",
+                bg="#ffffff",
+                font=("Microsoft YaHei UI", 10),
+                wraplength=600,
+                justify=LEFT,
+            ).pack(anchor="w", pady=(6, 0))
+            self._bind_screenshot_lookup_drag_recursive(box)
+            self._configure_screenshot_lookup_scroll(68, False)
+            self._position_screenshot_lookup_overlay(150)
+            overlay.lift()
+            return
+
+        for index, (row_data, confidence, raw_text) in enumerate(rows):
+            self._render_screenshot_lookup_row(index, row_data, confidence, raw_text)
+        visible_rows = min(len(rows), 5)
+        result_height = self._measure_screenshot_lookup_result_height(visible_rows)
+        self._configure_screenshot_lookup_scroll(result_height, len(rows) > 5)
+        self._position_screenshot_lookup_overlay(104 + result_height)
+        overlay.lift()
+        self._focus_screenshot_lookup_overlay(overlay)
+
+    def _render_screenshot_lookup_row(self, index: int, row_data: MarketRow, confidence: float, raw_text: str) -> None:
+        if self.screenshot_lookup_results is None:
+            return
+        item = Frame(self.screenshot_lookup_results, bg="#ffffff", pady=5)
+        item.pack(fill=X)
+        if index:
+            Canvas(item, height=1, bg="#e8eef5", highlightthickness=0).pack(fill=X, pady=(0, 7))
+        body = Frame(item, bg="#ffffff")
+        body.pack(fill=X)
+        order = Label(
+            body,
+            text=str(index + 1),
+            fg="#98a2b3",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 12, "bold"),
+            width=3,
+            anchor="w",
+        )
+        order.pack(side=LEFT)
+        name_box = Frame(body, bg="#ffffff")
+        name_box.pack(side=LEFT, fill=X, expand=True)
+        Label(
+            name_box,
+            text=row_data.item_name,
+            fg="#172033",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 13, "bold"),
+            anchor="w",
+        ).pack(anchor="w")
+        subtitle = row_data.source
+        Label(name_box, text=subtitle, fg="#8a97a6", bg="#ffffff", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(1, 0))
+
+        target_currency = self.display_currency_var.get() or self.config.display_currency
+        rate = self.db.get_exalted_per_divine()
+        amount = convert_amount(row_data.latest_amount, row_data.latest_currency, target_currency, rate)
+        price_box = Frame(body, bg="#ffffff")
+        price_box.pack(side=RIGHT, padx=(16, 0))
+        Label(
+            price_box,
+            text=f"{amount:g} {target_currency}",
+            fg="#c77d00",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 13, "bold"),
+        ).pack(anchor="e")
+        trend_color = "#1f9d55" if row_data.trend_percent.startswith("+") else "#d64545" if row_data.trend_percent.startswith("-") else "#8a97a6"
+        Label(price_box, text=f"趋势 {row_data.trend_percent or '暂无'}", fg=trend_color, bg="#ffffff", font=("Microsoft YaHei UI", 9)).pack(anchor="e")
+        self._bind_screenshot_lookup_drag_recursive(item)
+        self._bind_screenshot_lookup_click_recursive(item, row_data.item_name)
+
+    def _bind_screenshot_lookup_click_recursive(self, widget, item_name: str) -> None:
+        try:
+            widget.bind("<ButtonRelease-1>", lambda _event, name=item_name: self._choose_screenshot_lookup_item(name), add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_screenshot_lookup_click_recursive(child, item_name)
+
+    def _choose_screenshot_lookup_item(self, item_name: str) -> None:
+        if self.screenshot_lookup_drag_moved:
+            self.screenshot_lookup_drag_moved = False
+            return
+        self.search_var.set(item_name)
+        if self.root.state() != "withdrawn":
+            self._reset_page_and_refresh()
+        self.destroy_screenshot_lookup_overlay()
+
+    def _measure_screenshot_lookup_result_height(self, visible_rows: int) -> int:
+        if self.screenshot_lookup_results is None:
+            return max(1, visible_rows) * 68
+        try:
+            self.screenshot_lookup_results.update_idletasks()
+            children = self.screenshot_lookup_results.winfo_children()[:visible_rows]
+            measured = sum(max(child.winfo_reqheight(), child.winfo_height()) for child in children)
+        except Exception:
+            measured = 0
+        return max(max(1, visible_rows) * 68, measured + 6)
+
+    def _configure_screenshot_lookup_scroll(self, height: int, scrollable: bool) -> None:
+        canvas = self.screenshot_lookup_results_canvas
+        scrollbar = self.screenshot_lookup_results_scrollbar
+        if canvas is None or scrollbar is None:
+            return
+        canvas.configure(height=height)
+        if scrollable:
+            scrollbar.pack(side=RIGHT, fill=Y)
+            self._bind_focus_result_wheel_recursive(canvas, canvas)
+            if self.screenshot_lookup_results is not None:
+                self._bind_focus_result_wheel_recursive(self.screenshot_lookup_results, canvas)
+        else:
+            scrollbar.pack_forget()
+            canvas.yview_moveto(0)
+        canvas.after_idle(lambda: canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 0, 0)))
+
+    def _position_screenshot_lookup_overlay(self, height: int) -> None:
+        overlay = self.screenshot_lookup_overlay
+        if overlay is None:
+            return
+        width = 680
+        screen_width = overlay.winfo_screenwidth()
+        screen_height = overlay.winfo_screenheight()
+        x = max(24, int((screen_width - width) / 2))
+        center_y = int(screen_height * (1 - 0.618))
+        y = max(24, center_y - int(height / 2))
+        overlay.geometry(f"{width}x{height}+{x}+{y}")
+        self._draw_screenshot_lookup_shell(width, height)
+
+    def _draw_screenshot_lookup_shell(self, width: int, height: int) -> None:
+        canvas = self.screenshot_lookup_outer_canvas
+        if canvas is None:
+            return
+        rounded = bool(self.config.focus_search_rounded)
+        margin = 10 if rounded else 0
+        canvas.configure(width=width, height=height)
+        canvas.delete("shell")
+        if rounded:
+            points = self._rounded_rect_points(margin, margin, width - margin, height - margin, 18)
+            shell = canvas.create_polygon(points, smooth=True, fill="#ffffff", outline="#d8e1ea", tags="shell")
+        else:
+            shell = canvas.create_rectangle(0, 0, width, height, fill="#ffffff", outline="#d8e1ea", tags="shell")
+        canvas.tag_lower(shell)
+        if self.screenshot_lookup_container_window is not None:
+            canvas.coords(self.screenshot_lookup_container_window, margin, margin)
+            canvas.itemconfigure(self.screenshot_lookup_container_window, width=width - margin * 2, height=height - margin * 2)
+            canvas.tag_raise(self.screenshot_lookup_container_window)
+
+    def destroy_screenshot_lookup_overlay(self) -> None:
+        self._clear_screenshot_lookup_results()
+        overlay = self.screenshot_lookup_overlay
+        self.screenshot_lookup_overlay = None
+        self.screenshot_lookup_outer_canvas = None
+        self.screenshot_lookup_container = None
+        self.screenshot_lookup_container_window = None
+        self.screenshot_lookup_results = None
+        self.screenshot_lookup_results_canvas = None
+        self.screenshot_lookup_result_window = None
+        self.screenshot_lookup_results_scrollbar = None
+        self.screenshot_lookup_watch_token += 1
+        if overlay is not None and self._toplevel_exists(overlay):
+            try:
+                overlay.destroy()
             except Exception:
                 pass
 
@@ -2911,7 +3298,11 @@ class PriceTrackerApp:
 
     def open_capture_workbench(self) -> None:
         try:
-            image_path = capture_full_screen(self.config.screenshots_path, "workbench")
+            image_path = capture_full_screen(
+                self.config.screenshots_path,
+                "workbench",
+                max_files=self._screenshot_retention_count(),
+            )
         except Exception as exc:
             messagebox.showerror("截图失败", str(exc))
             return
@@ -2923,28 +3314,42 @@ class PriceTrackerApp:
             self._on_region_record_saved,
         )
 
-    def start_area_capture(self) -> None:
+    def start_area_capture(self, restore_after: bool = False) -> None:
+        self._restore_after_area_capture = restore_after
         self.root.withdraw()
         self.root.after(160, self._capture_for_selection)
 
     def _capture_for_selection(self) -> None:
         try:
-            image_path = capture_full_screen(self.config.screenshots_path, "selection")
+            image_path = capture_full_screen(
+                self.config.screenshots_path,
+                "selection",
+                max_files=self._screenshot_retention_count(),
+            )
         except Exception as exc:
-            self.root.deiconify()
+            if self._restore_after_area_capture:
+                self.root.deiconify()
             messagebox.showerror("截图失败", str(exc))
             return
         ScreenshotSelectionOverlay(
             self.root,
             image_path,
             self._recognize_selected_area,
-            on_cancel=lambda: self.root.deiconify(),
+            on_cancel=lambda: self.root.deiconify() if self._restore_after_area_capture else None,
         )
 
     def _recognize_selected_area(self, image_path: Path, box: tuple[int, int, int, int]) -> None:
-        self.root.deiconify()
+        if self._restore_after_area_capture:
+            self.root.deiconify()
         try:
-            crop_path = crop_image(image_path, box, self.config.screenshots_path, "selected-area", enhance=False)
+            crop_path = crop_image(
+                image_path,
+                box,
+                self.config.screenshots_path,
+                "selected-area",
+                enhance=False,
+                max_files=self._screenshot_retention_count(),
+            )
         except Exception as exc:
             messagebox.showerror("裁剪失败", str(exc))
             return
@@ -2952,8 +3357,13 @@ class PriceTrackerApp:
         self.ocr_review_raw_text = ""
         self.ocr_review_image_path = crop_path
         self.ocr_selected_index = None
-        self.show_ocr_review_page()
-        self._set_ocr_running_ui(True)
+        if self._should_update_ocr_review_page() and self._restore_after_area_capture:
+            self.show_ocr_review_page()
+        elif self._should_update_ocr_review_page() and getattr(self, "current_page_name", "") == "ocr":
+            self.show_ocr_review_page()
+        if self._should_update_ocr_review_page():
+            self._set_ocr_running_ui(True)
+        self.show_screenshot_lookup_loading()
         self._set_progress_busy("正在识别截图内容...")
         self.status_var.set("正在识别截图内容，请稍候。")
         threading.Thread(target=self._recognize_selected_area_worker, args=(crop_path,), daemon=True).start()
@@ -2962,21 +3372,92 @@ class PriceTrackerApp:
         worker_db = None
         try:
             ocr = RapidOcr()
-            result = ocr.recognize(crop_path)
+            try:
+                ocr_path = prepare_image_for_ocr(
+                    crop_path,
+                    self.config.screenshots_path,
+                    "selected-area-ocr",
+                    max_files=self._screenshot_retention_count(),
+                )
+            except Exception:
+                ocr_path = crop_path
+            result = ocr.recognize(ocr_path)
             worker_db = PriceDatabase(self.config.database_path)
-            rows = recognize_structured_prices(crop_path, result, db=worker_db, default_currency="崇高石")
+            rows = recognize_structured_prices(ocr_path, result, db=worker_db, default_currency="崇高石")
             if not rows:
                 rows = parse_item_price_rows(result.text, default_currency="崇高石")
+            candidates = self._screenshot_lookup_candidates(ocr_path, result, rows, worker_db)
+            lookup_rows = self._market_rows_for_candidates(candidates, worker_db)
             if not rows:
                 message = result.message or "没有识别到价格列表。请尝试框得更紧一些，或在配置中检查截图识别功能。"
-                self.events.put(("ocr_recognized", False, [], result.text, str(crop_path), message))
-                return
-            self.events.put(("ocr_recognized", True, rows, result.text, str(crop_path), ""))
+            else:
+                message = ""
+            self.events.put(
+                (
+                    "screenshot_lookup_done",
+                    bool(rows),
+                    rows,
+                    lookup_rows,
+                    result.text,
+                    str(crop_path),
+                    message,
+                )
+            )
         except Exception as exc:
-            self.events.put(("ocr_recognized", False, [], "", str(crop_path), str(exc)))
+            self.events.put(("screenshot_lookup_done", False, [], [], "", str(crop_path), str(exc)))
         finally:
             if worker_db is not None:
                 worker_db.close()
+
+    def _screenshot_lookup_candidates(
+        self,
+        crop_path: Path,
+        result,
+        rows: list[ParsedItemPrice],
+        db: PriceDatabase,
+    ) -> list[RecognizedItemCandidate]:
+        candidates: list[RecognizedItemCandidate] = []
+        for row in rows:
+            confidence = self._ocr_row_confidence(row)
+            candidates.append(
+                RecognizedItemCandidate(
+                    item_name=row.item_name,
+                    raw_text=row.raw_text,
+                    confidence=confidence,
+                    item_match_score=row.item_match_score,
+                )
+            )
+        candidates.extend(recognize_item_candidates(crop_path, result, db=db, min_score=0.62))
+        return candidates
+
+    def _market_rows_for_candidates(
+        self,
+        candidates: list[RecognizedItemCandidate],
+        db: PriceDatabase,
+    ) -> list[tuple[MarketRow, float, str]]:
+        results: list[tuple[MarketRow, float, str]] = []
+        seen: set[str] = set()
+        for candidate in candidates:
+            if candidate.confidence < 0.58:
+                continue
+            if hasattr(db, "match_item_name_strict"):
+                matched_name, match_score = db.match_item_name_strict(candidate.item_name)
+            else:
+                matched_name, match_score = db.match_item_name(candidate.item_name, min_score=0.92)
+            confidence = max(candidate.confidence, min(1.0, 0.35 + match_score * 0.65))
+            if match_score < 0.92 or confidence < 0.92:
+                continue
+            rows = db.get_market_rows(query=matched_name, sort_by="latest_at", descending=True, limit=5)
+            if not rows:
+                continue
+            exact_key = normalize_name(matched_name)
+            chosen = next((row for row in rows if normalize_name(row.item_name) == exact_key), rows[0])
+            key = normalize_name(chosen.item_name)
+            if key in seen:
+                continue
+            seen.add(key)
+            results.append((chosen, confidence, candidate.raw_text))
+        return results
 
     def open_image_workbench(self) -> None:
         path = filedialog.askopenfilename(
@@ -3008,6 +3489,7 @@ class PriceTrackerApp:
                 self.config.screenshot_width,
                 self.config.screenshot_height,
                 prefix,
+                max_files=self._screenshot_retention_count(),
             )
         except Exception as exc:
             messagebox.showerror("截图失败", str(exc))
@@ -3036,6 +3518,7 @@ class PriceTrackerApp:
                 Path(path),
                 self.config.screenshots_path,
                 "diagnose",
+                max_files=self._screenshot_retention_count(),
             )
         except Exception as exc:
             messagebox.showerror("图片预处理失败", str(exc))

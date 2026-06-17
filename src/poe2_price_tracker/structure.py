@@ -6,7 +6,8 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .ocr import OcrBox, OcrResult
-from .parser import ParsedItemPrice, normalize_currency
+from .db import normalize_name
+from .parser import ParsedItemPrice, meaningful_lines, normalize_currency
 
 if TYPE_CHECKING:
     from .db import PriceDatabase
@@ -59,6 +60,14 @@ class StructuredRow:
     item_match_score: float = 0.0
 
 
+@dataclass(frozen=True)
+class RecognizedItemCandidate:
+    item_name: str
+    raw_text: str
+    confidence: float
+    item_match_score: float = 0.0
+
+
 def _box_rect(box: OcrBox) -> Rect:
     if not box.points:
         return Rect(0, 0, 0, 0)
@@ -79,11 +88,33 @@ def _to_float(text: str) -> float | None:
 
 def _clean_item_text(text: str) -> str:
     text = re.sub(r"\bWiki\b", " ", text, flags=re.I)
+    text = re.sub(r"^\s*\d+\s*x\s*", " ", text, flags=re.I)
     text = re.sub(r"\bx\s*\d+\b", " ", text, flags=re.I)
     text = re.sub(r"\bLv\s*\d+\+?\b", " ", text, flags=re.I)
     text = re.sub(r"\d+\+?$", " ", text)
     text = re.sub(r"\s+", " ", text)
     return text.strip(" -|:：")
+
+
+def _clean_candidate_text(text: str) -> str:
+    text = _clean_item_text(text)
+    text = re.sub(r"^\s*\d+\s*x\s*", " ", text, flags=re.I)
+    text = re.sub(r"\b\d+(?:[.,]\d+)?\b", " ", text)
+    text = re.sub(r"[⇆↔→←=+%/\\|]", " ", text)
+    text = re.sub(r"\b(?:last|days|volume|traded|wiki|price)\b", " ", text, flags=re.I)
+    text = re.sub(r"\s+", " ", text)
+    return text.strip(" -|:：")
+
+
+def _looks_like_item_candidate(text: str) -> bool:
+    cleaned = _clean_candidate_text(text)
+    if len(cleaned) < 2:
+        return False
+    if NUMBER_RE.fullmatch(cleaned):
+        return False
+    if cleaned.lower() in {"wiki", "price", "last days", "volume traded"}:
+        return False
+    return True
 
 
 def _read_image(path: Path):
@@ -285,14 +316,17 @@ def recognize_structured_prices(
         matched_item = item_text
         item_score = 0.0
         if db is not None:
-            matched_item, item_score = db.match_item_name(item_text)
+            if hasattr(db, "match_item_name_strict"):
+                matched_item, item_score = db.match_item_name_strict(item_text)
+            else:
+                matched_item, item_score = db.match_item_name(item_text, min_score=0.92)
         icon_score = _icon_score
         currency = icon_currency or _primary_trade_currency(default_currency) or "崇高石"
         confidence = min(
             1.0,
             0.35
             + min(price_box.score, 1.0) * 0.25
-            + (0.2 if item_score >= 0.72 else 0.08)
+            + (0.2 if item_score >= 0.92 else 0.08)
             + (0.2 if icon_score >= 0.48 else 0.05),
         )
         raw = " | ".join(box.text for box in row_boxes)
@@ -307,3 +341,58 @@ def recognize_structured_prices(
             )
         )
     return rows
+
+
+def recognize_item_candidates(
+    image_path: Path,
+    ocr_result: OcrResult,
+    db: "PriceDatabase | None" = None,
+    min_score: float = 0.62,
+) -> list[RecognizedItemCandidate]:
+    raw_candidates: list[tuple[str, float]] = []
+
+    for row_rect, row_boxes in _group_boxes_by_rows(image_path, ocr_result.boxes):
+        row_text = " ".join(box.text for box in row_boxes)
+        if _looks_like_item_candidate(row_text):
+            score = sum(max(0.0, min(1.0, box.score)) for box in row_boxes) / max(1, len(row_boxes))
+            raw_candidates.append((row_text, score))
+        for box in row_boxes:
+            if _looks_like_item_candidate(box.text):
+                raw_candidates.append((box.text, max(0.0, min(1.0, box.score))))
+
+    for line in meaningful_lines(ocr_result.text):
+        if _looks_like_item_candidate(line):
+            raw_candidates.append((line, 0.72))
+
+    results: list[RecognizedItemCandidate] = []
+    seen_raw: set[str] = set()
+    seen_items: set[str] = set()
+    for raw, ocr_score in raw_candidates:
+        cleaned = _clean_candidate_text(raw)
+        raw_key = normalize_name(cleaned)
+        if not raw_key or raw_key in seen_raw:
+            continue
+        seen_raw.add(raw_key)
+        item_name = cleaned
+        match_score = 0.0
+        if db is not None:
+            if hasattr(db, "match_item_name_strict"):
+                item_name, match_score = db.match_item_name_strict(cleaned)
+            else:
+                item_name, match_score = db.match_item_name(cleaned, min_score=max(min_score, 0.92))
+        confidence = min(1.0, 0.25 + ocr_score * 0.25 + match_score * 0.5)
+        if db is not None and match_score < 0.92:
+            continue
+        item_key = normalize_name(item_name)
+        if not item_key or item_key in seen_items:
+            continue
+        seen_items.add(item_key)
+        results.append(
+            RecognizedItemCandidate(
+                item_name=item_name,
+                raw_text=raw,
+                confidence=confidence,
+                item_match_score=match_score,
+            )
+        )
+    return results

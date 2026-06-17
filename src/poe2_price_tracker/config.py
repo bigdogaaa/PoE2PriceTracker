@@ -42,6 +42,8 @@ class AppConfig:
     focus_search_limit: int = 5
     manual_add_favorite: bool = True
     preload_ocr_on_start: bool = False
+    screenshot_retention_count: int = 20
+    show_ocr_review_details: bool = True
     minimize_action: str = "ask"
     close_action: str = "ask"
     visible_columns: list[str] = field(
@@ -103,6 +105,10 @@ def load_config() -> AppConfig:
         loaded.focus_search_limit = max(1, min(10, int(loaded.focus_search_limit or 5)))
     except (TypeError, ValueError):
         loaded.focus_search_limit = 5
+    try:
+        loaded.screenshot_retention_count = max(1, min(500, int(loaded.screenshot_retention_count or 20)))
+    except (TypeError, ValueError):
+        loaded.screenshot_retention_count = 20
     if "图标" not in loaded.visible_columns:
         try:
             index = loaded.visible_columns.index("物品")

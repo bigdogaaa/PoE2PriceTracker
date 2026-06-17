@@ -134,9 +134,9 @@ https://poe2db.tw/cn/Economy
 
 https://github.com/bigdogaaa/PoE2PriceTracker/releases/latest
 
-当前版本：`0.3.18`
+当前版本：`0.3.19`
 
-如果你只是使用软件，下载 release 中的 `PoE2PriceTracker-0.3.18.zip` 即可。
+如果你只是使用软件，下载 release 中的 `PoE2PriceTracker-0.3.19.zip` 即可。
 
 ## 数据说明
 
@@ -207,6 +207,13 @@ https://github.com/bigdogaaa/PoE2PriceTracker/releases/latest
 若用户希望删除本软件产生的本地数据，可通过软件设置、清理缓存、删除配置文件或卸载软件等方式处理。
 
 ## 更新说明
+
+### 2026-06-17 v0.3.19
+
+- 新增实时截图查价：框选截图后自动识别物品并显示价格列表
+- 优化截图识别页，可按需显示或隐藏识别详情
+- 新增截图缓存数量设置，默认只保留最近 20 张
+- 收紧物品匹配规则，减少误识别结果
 
 ### 2026-06-17
 
