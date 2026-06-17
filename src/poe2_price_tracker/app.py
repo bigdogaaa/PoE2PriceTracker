@@ -2223,6 +2223,7 @@ class PriceTrackerApp:
             return
         self.trend_render_job = None
         self._clear_trend_canvases()
+        tree_height = self.market_tree.winfo_height()
         display_columns = self.market_tree["displaycolumns"]
         visible = set() if display_columns == "#all" or display_columns == ("#all",) else set(display_columns)
         if visible and "trend" not in visible:
@@ -2232,7 +2233,7 @@ class PriceTrackerApp:
             if not bbox:
                 continue
             x, y, width, height = bbox
-            if width <= 8 or height <= 8:
+            if width <= 8 or height <= 8 or y < 0 or y + height > tree_height - 3:
                 continue
             values, percent = self.trend_data.get(iid, ([], ""))
             tags = self.market_tree.item(iid, "tags")
