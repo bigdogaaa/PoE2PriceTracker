@@ -42,6 +42,10 @@ class AppConfig:
     focus_search_limit: int = 5
     manual_add_favorite: bool = True
     preload_ocr_on_start: bool = False
+    ocr_cpu_threads: int = 0
+    ocr_execution_provider: str = "auto"
+    ocr_low_priority: bool = True
+    ocr_performance_configured: bool = False
     screenshot_retention_count: int = 20
     show_ocr_review_details: bool = True
     minimize_action: str = "ask"
@@ -109,6 +113,14 @@ def load_config() -> AppConfig:
         loaded.screenshot_retention_count = max(1, min(500, int(loaded.screenshot_retention_count or 20)))
     except (TypeError, ValueError):
         loaded.screenshot_retention_count = 20
+    try:
+        loaded.ocr_cpu_threads = max(0, min(64, int(loaded.ocr_cpu_threads or 0)))
+    except (TypeError, ValueError):
+        loaded.ocr_cpu_threads = 0
+    if loaded.ocr_execution_provider not in {"cpu", "auto", "cuda", "directml"}:
+        loaded.ocr_execution_provider = "auto"
+    if not raw.get("ocr_performance_configured", False) and raw.get("ocr_execution_provider", "") in {"", "cpu"}:
+        loaded.ocr_execution_provider = "auto"
     if "图标" not in loaded.visible_columns:
         try:
             index = loaded.visible_columns.index("物品")

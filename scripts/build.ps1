@@ -16,7 +16,8 @@ if (-not $Version) {
         $Version = $Matches[1]
     }
 }
-$BuildName = if ($OneFile -and $Version) { "$AppName-$Version" } else { $AppName }
+$OneFile = $true
+$BuildName = if ($Version) { "$AppName-$Version" } else { $AppName }
 
 function Invoke-Checked {
     param([string]$Exe, [string[]]$ArgList)
@@ -51,19 +52,47 @@ $PyInstallerArgs = @(
     "--noconfirm",
     "--clean",
     "--windowed",
+    "--optimize", "1",
     "--workpath", "build\$BuildName",
+    "--distpath", "dist",
+    "--onefile",
+    "--icon", "src\poe2_price_tracker\assets\app_icon.ico",
+    "--additional-hooks-dir", "scripts\pyinstaller_hooks",
     "--exclude-module", "PIL.ImageQt",
-    "--collect-all", "rapidocr",
+    "--exclude-module", "pandas",
+    "--exclude-module", "pyarrow",
+    "--exclude-module", "pytest",
+    "--exclude-module", "matplotlib",
+    "--exclude-module", "scipy",
+    "--exclude-module", "sklearn",
+    "--exclude-module", "IPython",
+    "--exclude-module", "jupyter",
+    "--exclude-module", "notebook",
+    "--exclude-module", "torch",
+    "--exclude-module", "tensorflow",
+    "--exclude-module", "paddle",
+    "--exclude-module", "paddleocr",
+    "--exclude-module", "openvino",
+    "--exclude-module", "tensorrt",
+    "--exclude-module", "MNN",
+    "--exclude-module", "sympy",
+    "--exclude-module", "mpmath",
+    "--exclude-module", "onnxruntime.tools",
+    "--exclude-module", "onnxruntime.transformers",
+    "--exclude-module", "rapidocr.inference_engine.pytorch",
+    "--exclude-module", "rapidocr.inference_engine.paddle",
+    "--exclude-module", "rapidocr.inference_engine.openvino",
+    "--exclude-module", "rapidocr.inference_engine.tensorrt",
+    "--exclude-module", "rapidocr.inference_engine.mnn",
+    "--collect-data", "rapidocr",
     "--collect-binaries", "onnxruntime",
     "--hidden-import", "rapidocr",
+    "--hidden-import", "rapidocr.inference_engine.onnxruntime",
     "--hidden-import", "onnxruntime",
     "--name", $BuildName,
     "--paths", "src",
     "src\poe2_price_tracker\__main__.py"
 )
-if ($OneFile) {
-    $PyInstallerArgs = $PyInstallerArgs[0..4] + @("--onefile") + $PyInstallerArgs[5..($PyInstallerArgs.Length - 1)]
-}
 
 $OcrBundle = Join-Path $Root "tools\ocr"
 if (Test-Path $OcrBundle) {
@@ -79,11 +108,5 @@ if (Test-Path $AssetBundle) {
 
 Invoke-Checked $BuildPython $PyInstallerArgs
 
-if ($OneFile) {
-    $BuiltPath = Join-Path $Root "dist\$BuildName.exe"
-    Write-Host "Built: $BuiltPath"
-}
-else {
-    $BuiltPath = Join-Path $Root "dist\$AppName\$AppName.exe"
-    Write-Host "Built: $BuiltPath"
-}
+$BuiltPath = Join-Path $Root "dist\$BuildName.exe"
+Write-Host "Built: $BuiltPath"

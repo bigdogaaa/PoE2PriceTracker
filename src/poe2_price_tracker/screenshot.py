@@ -34,6 +34,36 @@ def enhance_for_ocr(image: Image.Image) -> Image.Image:
     return resized.filter(ImageFilter.SHARPEN)
 
 
+def _stamp() -> str:
+    return datetime.now().strftime("%Y%m%d-%H%M%S-%f")
+
+
+def _save_png_fast(image: Image.Image, path: Path) -> None:
+    image.save(path, optimize=False, compress_level=1)
+
+
+def _normalize_box(box: tuple[int, int, int, int]) -> tuple[int, int, int, int]:
+    left, top, right, bottom = box
+    if right < left:
+        left, right = right, left
+    if bottom < top:
+        top, bottom = bottom, top
+    return left, top, right, bottom
+
+
+def save_image(
+    image: Image.Image,
+    output_dir: Path,
+    prefix: str,
+    max_files: int = 20,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    path = output_dir / f"{prefix}-{_stamp()}.png"
+    _save_png_fast(image, path)
+    prune_screenshots(output_dir, max_files)
+    return path
+
+
 def prune_screenshots(output_dir: Path, max_count: int = 20) -> None:
     try:
         max_count = max(1, int(max_count))
@@ -55,9 +85,22 @@ def prepare_image_for_ocr(source_path: Path, output_dir: Path, prefix: str = "oc
     output_dir.mkdir(parents=True, exist_ok=True)
     image = Image.open(source_path)
     enhanced = enhance_for_ocr(image)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = output_dir / f"{prefix}-{stamp}.png"
-    enhanced.save(path)
+    path = output_dir / f"{prefix}-{_stamp()}.png"
+    _save_png_fast(enhanced, path)
+    prune_screenshots(output_dir, max_files)
+    return path
+
+
+def prepare_image_for_ocr_image(
+    image: Image.Image,
+    output_dir: Path,
+    prefix: str = "ocr",
+    max_files: int = 20,
+) -> Path:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    enhanced = enhance_for_ocr(image)
+    path = output_dir / f"{prefix}-{_stamp()}.png"
+    _save_png_fast(enhanced, path)
     prune_screenshots(output_dir, max_files)
     return path
 
@@ -76,25 +119,22 @@ def capture_around_cursor(
     bbox = (left, top, left + width, top + height)
     image = ImageGrab.grab(bbox=bbox, all_screens=True)
     enhanced = enhance_for_ocr(image)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = output_dir / f"{prefix}-{stamp}.png"
-    enhanced.save(path)
+    path = output_dir / f"{prefix}-{_stamp()}.png"
+    _save_png_fast(enhanced, path)
     prune_screenshots(output_dir, max_files)
     return path
+
+
+def capture_full_screen_image() -> Image.Image:
+    return ImageGrab.grab(all_screens=True)
 
 
 def capture_full_screen(output_dir: Path, prefix: str = "screen", max_files: int = 20) -> Path:
-    output_dir.mkdir(parents=True, exist_ok=True)
-    image = ImageGrab.grab(all_screens=True)
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = output_dir / f"{prefix}-{stamp}.png"
-    image.save(path)
-    prune_screenshots(output_dir, max_files)
-    return path
+    return save_image(capture_full_screen_image(), output_dir, prefix, max_files)
 
 
 def crop_image(
-    source_path: Path,
+    source_path: Path | Image.Image,
     box: tuple[int, int, int, int],
     output_dir: Path,
     prefix: str,
@@ -102,16 +142,39 @@ def crop_image(
     max_files: int = 20,
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
-    image = Image.open(source_path)
-    left, top, right, bottom = box
-    if right < left:
-        left, right = right, left
-    if bottom < top:
-        top, bottom = bottom, top
-    cropped = image.crop((left, top, right, bottom))
+    left, top, right, bottom = _normalize_box(box)
+    if isinstance(source_path, Image.Image):
+        cropped = source_path.crop((left, top, right, bottom))
+    else:
+        with Image.open(source_path) as image:
+            cropped = image.crop((left, top, right, bottom))
     output = enhance_for_ocr(cropped) if enhance else cropped
-    stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
-    path = output_dir / f"{prefix}-{stamp}.png"
-    output.save(path)
+    path = output_dir / f"{prefix}-{_stamp()}.png"
+    _save_png_fast(output, path)
     prune_screenshots(output_dir, max_files)
     return path
+
+
+def crop_and_prepare_for_ocr(
+    source: Path | Image.Image,
+    box: tuple[int, int, int, int],
+    output_dir: Path,
+    crop_prefix: str = "selected-area",
+    ocr_prefix: str = "selected-area-ocr",
+    max_files: int = 20,
+) -> tuple[Path, Path]:
+    output_dir.mkdir(parents=True, exist_ok=True)
+    left, top, right, bottom = _normalize_box(box)
+    if isinstance(source, Image.Image):
+        cropped = source.crop((left, top, right, bottom))
+    else:
+        with Image.open(source) as image:
+            cropped = image.crop((left, top, right, bottom))
+
+    crop_path = output_dir / f"{crop_prefix}-{_stamp()}.png"
+    _save_png_fast(cropped, crop_path)
+    enhanced = enhance_for_ocr(cropped)
+    ocr_path = output_dir / f"{ocr_prefix}-{_stamp()}.png"
+    _save_png_fast(enhanced, ocr_path)
+    prune_screenshots(output_dir, max_files)
+    return crop_path, ocr_path

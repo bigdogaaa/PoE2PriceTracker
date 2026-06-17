@@ -1,6 +1,6 @@
 [project]
 name = "poe2-price-tracker"
-version = "0.3.19"
+version = "0.3.20"
 description = "Local screenshot-first price tracker for Path of Exile 2."
 requires-python = ">=3.11"
 dependencies = [
@@ -29,7 +29,7 @@ build-backend = "setuptools.build_meta"
 where = ["src"]
 
 [tool.setuptools.package-data]
-poe2_price_tracker = ["assets/icons/currency/*"]
+poe2_price_tracker = ["assets/app_icon.ico", "assets/icons/currency/*"]
 
 [tool.pytest.ini_options]
 pythonpath = ["src"]

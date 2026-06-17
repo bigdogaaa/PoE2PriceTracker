@@ -2,6 +2,7 @@ Pillow>=10.0
 ttkbootstrap>=1.10
 pystray>=0.19
 rapidocr>=3.0.0
-onnxruntime>=1.17
+onnxruntime>=1.17; platform_system != "Windows"
+onnxruntime-directml>=1.24; platform_system == "Windows"
 opencv-python-headless>=4.8
 rapidfuzz>=3.0

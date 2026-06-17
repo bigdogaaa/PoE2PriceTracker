@@ -10,6 +10,10 @@ def _asset_root():
     return resources.files(__package__).joinpath("assets", "icons", "currency")
 
 
+def app_icon_path():
+    return resources.files(__package__).joinpath("assets", "app_icon.ico")
+
+
 def bundled_currency_manifest() -> list[dict[str, str]]:
     manifest = _asset_root().joinpath("manifest.json")
     if not manifest.is_file():

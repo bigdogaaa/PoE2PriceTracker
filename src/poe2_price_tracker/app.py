@@ -3,6 +3,7 @@ from __future__ import annotations
 import queue
 import ctypes
 import json
+import os
 import re
 import subprocess
 import sys
@@ -53,7 +54,7 @@ Combobox = ttk.Combobox
 ERROR_ALREADY_EXISTS = 183
 _INSTANCE_MUTEX_HANDLE = None
 
-from .bundled_assets import seed_bundled_currency_icons
+from .bundled_assets import app_icon_path, seed_bundled_currency_icons
 from . import __version__
 from .config import AppConfig, load_config, save_config
 from .currencies import BASE_CURRENCIES
@@ -63,7 +64,14 @@ from .hotkeys import GlobalHotkeys, parse_hotkey
 from .ocr import RapidOcr
 from .parser import ParsedItemPrice, ParsedPrice, find_number, meaningful_lines, parse_item_price_rows, parse_ocr_text
 from .poe2db_sync import fetch_all_economy_prices
-from .screenshot import capture_around_cursor, capture_full_screen, crop_image, prepare_image_for_ocr
+from .screenshot import (
+    capture_around_cursor,
+    capture_full_screen,
+    capture_full_screen_image,
+    crop_and_prepare_for_ocr,
+    crop_image,
+    prepare_image_for_ocr,
+)
 from .structure import RecognizedItemCandidate, recognize_item_candidates, recognize_structured_prices
 from .updater import UpdateInfo, check_update, download_update
 
@@ -278,9 +286,9 @@ class SettingsDialog:
 
 
 class ScreenshotSelectionOverlay:
-    def __init__(self, parent: Tk, image_path: Path, on_confirm, on_cancel=None):
+    def __init__(self, parent: Tk, image_source: Path | Image.Image, on_confirm, on_cancel=None):
         self.parent = parent
-        self.image_path = image_path
+        self.image_source = image_source
         self.on_confirm = on_confirm
         self.on_cancel = on_cancel
         self.window = Toplevel(parent)
@@ -292,7 +300,10 @@ class ScreenshotSelectionOverlay:
         )
         self.window.focus_force()
 
-        self.original = Image.open(image_path)
+        if isinstance(image_source, Image.Image):
+            self.original = image_source
+        else:
+            self.original = Image.open(image_source)
         screen_w = self.window.winfo_screenwidth()
         screen_h = self.window.winfo_screenheight()
         self.scale = min(screen_w / self.original.width, screen_h / self.original.height)
@@ -300,7 +311,7 @@ class ScreenshotSelectionOverlay:
             int(self.original.width * self.scale),
             int(self.original.height * self.scale),
         )
-        self.display_image = self.original.resize(display_size).convert("RGB")
+        self.display_image = self.original.resize(display_size, Image.Resampling.BILINEAR).convert("RGB")
         dimmed = self.display_image.convert("RGBA")
         shade = Image.new("RGBA", dimmed.size, (0, 0, 0, 115))
         dimmed = Image.alpha_composite(dimmed, shade).convert("RGB")
@@ -330,6 +341,8 @@ class ScreenshotSelectionOverlay:
         self.rect_id: int | None = None
         self.box: tuple[int, int, int, int] | None = None
         self.action_window: Toplevel | None = None
+        self._last_drag_preview_at = 0.0
+        self._last_drag_preview_box: tuple[int, int, int, int] | None = None
 
         self.canvas.bind("<ButtonPress-1>", self._start)
         self.canvas.bind("<B1-Motion>", self._drag)
@@ -361,14 +374,26 @@ class ScreenshotSelectionOverlay:
             x1, y1 = event.x, event.y
             left, right = sorted((x0, x1))
             top, bottom = sorted((y0, y1))
-            if self.selection_image_id:
-                self.canvas.delete(self.selection_image_id)
-            if right > left and bottom > top:
-                crop = self.display_image.crop((left, top, right, bottom))
-                self.selection_photo = ImageTk.PhotoImage(crop)
-                self.selection_image_id = self.canvas.create_image(left, top, anchor="nw", image=self.selection_photo)
+            preview_box = (left, top, right, bottom)
+            now = time.monotonic()
+            if self._should_update_drag_preview(preview_box, now):
+                if self.selection_image_id:
+                    self.canvas.delete(self.selection_image_id)
+                if right > left and bottom > top:
+                    crop = self.display_image.crop((left, top, right, bottom))
+                    self.selection_photo = ImageTk.PhotoImage(crop)
+                    self.selection_image_id = self.canvas.create_image(left, top, anchor="nw", image=self.selection_photo)
+                self._last_drag_preview_at = now
+                self._last_drag_preview_box = preview_box
             self.canvas.coords(self.rect_id, x0, y0, x1, y1)
             self.canvas.tag_raise(self.rect_id)
+
+    def _should_update_drag_preview(self, box: tuple[int, int, int, int], now: float) -> bool:
+        if self._last_drag_preview_box is None:
+            return True
+        if now - self._last_drag_preview_at >= 0.025:
+            return True
+        return any(abs(current - previous) >= 8 for current, previous in zip(box, self._last_drag_preview_box))
 
     def _finish(self, event) -> None:
         if not self.start:
@@ -408,7 +433,7 @@ class ScreenshotSelectionOverlay:
             return
         box = self.box
         self.window.destroy()
-        self.on_confirm(self.image_path, box)
+        self.on_confirm(self.image_source, box)
 
     def cancel(self) -> None:
         self.window.destroy()
@@ -668,7 +693,10 @@ class RegionOcrWorkbench:
             messagebox.showwarning("缺少区域", "请先框选物品名区域和价格区域。", parent=self.window)
             return
 
-        ocr = RapidOcr()
+        ocr = RapidOcr(
+            cpu_threads=getattr(self.config, "ocr_cpu_threads", 0),
+            execution_provider=getattr(self.config, "ocr_execution_provider", "cpu"),
+        )
         item_crop = crop_image(
             self.image_path,
             self.rectangles["item"],
@@ -749,9 +777,11 @@ class PriceTrackerApp:
         self.config = load_config()
         self.db = PriceDatabase(self.config.database_path)
         self.bundled_currency_icon_count = seed_bundled_currency_icons(self.db)
-        self.ocr = RapidOcr()
+        self.ocr = self._make_ocr_engine()
+        self.ocr_lock = threading.Lock()
         self.hotkeys = GlobalHotkeys()
-        self.events: queue.Queue[str] = queue.Queue()
+        self.events: queue.Queue[object] = queue.Queue()
+        self._draining_events = False
 
         self.search_var = StringVar()
         self.focus_search_var = StringVar()
@@ -807,6 +837,7 @@ class PriceTrackerApp:
         self.screenshot_lookup_drag_start: tuple[int, int, int, int] | None = None
         self.screenshot_lookup_drag_moved = False
         self._restore_after_area_capture = False
+        self._area_capture_active = False
         self.ocr_review_rows: list[ParsedItemPrice] = []
         self.ocr_review_raw_text = ""
         self.ocr_review_image_path = Path()
@@ -821,8 +852,13 @@ class PriceTrackerApp:
         self.ocr_animation_step = 0
         self.ocr_capture_photo = None
         self.preload_ocr_var = StringVar(value="1" if self.config.preload_ocr_on_start else "0")
+        self.ocr_cpu_threads_var = StringVar(value=self._ocr_threads_display_value(self.config.ocr_cpu_threads))
+        self.ocr_provider_var = StringVar(value=self._ocr_provider_label(self.config.ocr_execution_provider))
+        self.ocr_low_priority_var = StringVar(value="1" if self.config.ocr_low_priority else "0")
+        self.app_icon_image = None
 
         self.root.title(f"流放之路2 物价追踪 v{__version__}")
+        self._apply_window_icon()
         self.root.geometry("1120x760")
         self.root.minsize(980, 640)
         self._configure_style()
@@ -831,6 +867,7 @@ class PriceTrackerApp:
         self._register_hotkeys()
         self._refresh_recent()
         self._poll_events()
+        self.root.bind_all("<Escape>", self._handle_overlay_escape, add="+")
         if self.config.preload_ocr_on_start:
             self.root.after(600, self.prepare_ocr_runtime)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close_request)
@@ -924,8 +961,25 @@ class PriceTrackerApp:
 
     def _set_progress_busy(self, text: str) -> None:
         self.progress.configure(mode="indeterminate", value=0)
-        self.progress.start(12)
+        self.progress.start(80)
         self.progress_var.set(text)
+
+    def _apply_window_icon(self) -> None:
+        try:
+            self.root.iconbitmap(str(app_icon_path()))
+        except Exception:
+            pass
+
+    def _load_app_icon_image(self, size: int = 64) -> Image.Image:
+        try:
+            image = Image.open(app_icon_path()).convert("RGBA")
+            return image.resize((size, size), Image.Resampling.LANCZOS)
+        except Exception:
+            image = Image.new("RGB", (size, size), "#2f80ed")
+            draw = ImageDraw.Draw(image)
+            draw.rounded_rectangle((8, 8, size - 8, size - 8), radius=12, fill="#ffffff")
+            draw.text((max(4, size // 3), max(4, size // 3)), "P2", fill="#2f80ed")
+            return image
 
     def _set_progress_percent(self, percent: int, text: str) -> None:
         self.progress.stop()
@@ -938,8 +992,88 @@ class PriceTrackerApp:
         except (TypeError, ValueError):
             return 20
 
+    def _make_ocr_engine(self) -> RapidOcr:
+        return RapidOcr(
+            cpu_threads=getattr(self.config, "ocr_cpu_threads", 0),
+            execution_provider=getattr(self.config, "ocr_execution_provider", "auto"),
+        )
+
+    @staticmethod
+    def _ocr_provider_label(value: str) -> str:
+        labels = {
+            "cpu": "CPU",
+            "auto": "自动",
+            "directml": "GPU DirectML",
+            "cuda": "GPU CUDA",
+        }
+        return labels.get((value or "auto").lower(), "自动")
+
+    @staticmethod
+    def _ocr_provider_value(label: str) -> str:
+        values = {
+            "CPU": "cpu",
+            "自动": "auto",
+            "GPU DirectML": "directml",
+            "GPU CUDA": "cuda",
+        }
+        return values.get(label, "auto")
+
+    @staticmethod
+    def _auto_ocr_cpu_threads() -> int:
+        return RapidOcr(cpu_threads=0).cpu_threads
+
+    @staticmethod
+    def _ocr_threads_display_value(value: int) -> str:
+        try:
+            threads = int(value)
+        except (TypeError, ValueError):
+            threads = 0
+        if threads <= 0:
+            return "自动"
+        return str(threads)
+
+    @staticmethod
+    def _ocr_threads_config_value(value: str) -> int:
+        text = (value or "").strip()
+        if not text or text == "自动":
+            return 0
+        try:
+            return max(0, int(text))
+        except ValueError:
+            return 0
+
+    @staticmethod
+    def _available_ocr_provider_text() -> str:
+        providers = RapidOcr.available_providers()
+        return "，".join(providers) if providers else "未检测到 onnxruntime"
+
+    def _set_ocr_process_priority(self, low: bool) -> int | None:
+        try:
+            kernel32 = ctypes.windll.kernel32
+            handle = kernel32.GetCurrentProcess()
+            previous = int(kernel32.GetPriorityClass(handle))
+            target = 0x00004000 if low else 0x00000020
+            kernel32.SetPriorityClass(handle, target)
+            return previous
+        except Exception:
+            return None
+
+    def _restore_process_priority(self, priority: int | None) -> None:
+        if not priority:
+            return
+        try:
+            ctypes.windll.kernel32.SetPriorityClass(ctypes.windll.kernel32.GetCurrentProcess(), int(priority))
+        except Exception:
+            pass
+
     def _should_update_ocr_review_page(self) -> bool:
         return bool(getattr(self.config, "show_ocr_review_details", True))
+
+    def _clear_ocr_review_data(self) -> None:
+        self.ocr_review_rows = []
+        self.ocr_review_raw_text = ""
+        self.ocr_review_image_path = Path()
+        self.ocr_selected_index = None
 
     def _clear_content(self) -> None:
         if hasattr(self, "trend_widgets"):
@@ -1035,6 +1169,13 @@ class PriceTrackerApp:
         toolbar.pack(fill=X, pady=(12, 10))
         Button(toolbar, text="截图识别", command=lambda: self.start_area_capture(restore_after=True)).pack(side=LEFT)
         Label(toolbar, text="框选后会先显示截图，再自动识别内容。").pack(side=LEFT, padx=(12, 0))
+        if not self._should_update_ocr_review_page():
+            Label(
+                self.content,
+                text="截图识别详情已隐藏。识别结果仍会在查价浮窗中显示。",
+                foreground="#607080",
+            ).pack(anchor="w", pady=(8, 0))
+            return
         Button(toolbar, text="保存选中", command=self.save_selected_ocr_row).pack(side=RIGHT)
         Button(toolbar, text="保存全部", command=self.save_all_ocr_rows).pack(side=RIGHT, padx=(0, 8))
         ttk.Checkbutton(
@@ -1563,6 +1704,44 @@ class PriceTrackerApp:
         Label(ocr_row, text="准备状态", width=10, anchor="w").pack(side=LEFT)
         Entry(ocr_row, textvariable=self.ocr_status_var, state="readonly").pack(side=LEFT, fill=X, expand=True)
         Button(ocr_row, text="提前准备", command=self.prepare_ocr_runtime).pack(side=LEFT, padx=(8, 0))
+        row = Frame(ocr_box)
+        row.pack(fill=X, pady=(10, 0))
+        Label(row, text="OCR推理后端", width=14, anchor="w").pack(side=LEFT)
+        provider = Combobox(
+            row,
+            textvariable=self.ocr_provider_var,
+            values=["CPU", "自动", "GPU DirectML", "GPU CUDA"],
+            state="readonly",
+        )
+        provider.pack(side=LEFT, fill=X, expand=True)
+        provider.bind("<<ComboboxSelected>>", lambda _event: self.save_ocr_performance_settings())
+        row = Frame(ocr_box)
+        row.pack(fill=X, pady=6)
+        Label(row, text="OCR CPU线程", width=14, anchor="w").pack(side=LEFT)
+        threads = Combobox(
+            row,
+            textvariable=self.ocr_cpu_threads_var,
+            values=["自动", "1", "2", "3", "4", "6", "8"],
+            state="readonly",
+        )
+        threads.pack(side=LEFT, fill=X, expand=True)
+        threads.bind("<<ComboboxSelected>>", lambda _event: self.save_ocr_performance_settings())
+        threads.bind("<FocusOut>", lambda _event: self.save_ocr_performance_settings())
+        threads.bind("<Return>", lambda _event: self.save_ocr_performance_settings())
+        Label(
+            ocr_box,
+            text=f"检测到 {os.cpu_count() or 1} 个逻辑核心",
+            foreground="#607080",
+            wraplength=760,
+        ).pack(anchor="w", pady=(2, 0))
+        ttk.Checkbutton(
+            ocr_box,
+            text="识别时降低本程序优先级，减少游戏卡顿",
+            variable=self.ocr_low_priority_var,
+            onvalue="1",
+            offvalue="0",
+            command=self.save_ocr_performance_settings,
+        ).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(
             ocr_box,
             text="启动后自动提前准备截图识别",
@@ -1653,6 +1832,25 @@ class PriceTrackerApp:
         self.config.ocr_engine = "rapidocr"
         save_config(self.config)
 
+    def save_ocr_performance_settings(self) -> None:
+        old_threads = getattr(self.config, "ocr_cpu_threads", 0)
+        old_provider = getattr(self.config, "ocr_execution_provider", "auto")
+        old_low_priority = getattr(self.config, "ocr_low_priority", True)
+        self.config.ocr_cpu_threads = self._ocr_threads_config_value(self.ocr_cpu_threads_var.get())
+        self.config.ocr_execution_provider = self._ocr_provider_value(self.ocr_provider_var.get())
+        self.config.ocr_low_priority = self.ocr_low_priority_var.get() == "1"
+        self.config.ocr_performance_configured = True
+        save_config(self.config)
+        if (
+            old_threads != self.config.ocr_cpu_threads
+            or old_provider != self.config.ocr_execution_provider
+            or old_low_priority != self.config.ocr_low_priority
+        ):
+            with self.ocr_lock:
+                self.ocr = self._make_ocr_engine()
+        threads_text = self._auto_ocr_cpu_threads() if self.config.ocr_cpu_threads <= 0 else self.config.ocr_cpu_threads
+        self.status_var.set(f"OCR性能设置已保存：{self._ocr_provider_label(self.config.ocr_execution_provider)}，{threads_text} 线程")
+
     def save_preload_ocr_setting(self) -> None:
         self.config.preload_ocr_on_start = self.preload_ocr_var.get() == "1"
         save_config(self.config)
@@ -1660,7 +1858,11 @@ class PriceTrackerApp:
 
     def save_ocr_details_setting(self) -> None:
         self.config.show_ocr_review_details = self.show_ocr_details_var.get() == "1"
+        if not self.config.show_ocr_review_details:
+            self._clear_ocr_review_data()
         save_config(self.config)
+        if getattr(self, "current_page_name", "") == "ocr":
+            self.show_ocr_review_page()
         self.status_var.set("截图识别详情偏好已保存。")
 
     def save_window_behavior_settings(self) -> None:
@@ -1679,12 +1881,12 @@ class PriceTrackerApp:
 
     def _prepare_ocr_runtime_worker(self) -> None:
         try:
-            ocr = RapidOcr()
-            ok = ocr.available()
+            with self.ocr_lock:
+                ok = self.ocr.available()
             message = "截图识别已准备好。" if ok else "截图识别功能暂时不可用，请重新安装新版程序。"
-            self.events.put(("ocr_done", ok, "截图识别已准备好", message))
+            self._post_event(("ocr_done", ok, "截图识别已准备好", message))
         except Exception as exc:
-            self.events.put(("ocr_done", False, "", str(exc)))
+            self._post_event(("ocr_done", False, "", str(exc)))
 
     @staticmethod
     def _window_action_label(value: str, kind: str) -> str:
@@ -2250,15 +2452,15 @@ class PriceTrackerApp:
     def _register_hotkeys(self) -> None:
         self.hotkeys.register(
             self.config.hotkeys.lookup_hovered,
-            lambda: self.events.put("open_workbench"),
+            lambda: self._post_event("open_workbench"),
         )
         self.hotkeys.register(
             self.config.hotkeys.focus_search,
-            lambda: self.events.put("focus_search"),
+            lambda: self._post_event("focus_search"),
         )
         self.hotkeys.register(
             self.config.hotkeys.quick_price,
-            lambda: self.events.put("quick_price"),
+            lambda: self._post_event("quick_price"),
         )
         self.hotkeys.start()
         if self.hotkeys.errors:
@@ -2278,7 +2480,17 @@ class PriceTrackerApp:
                 f"快速查价 {self.config.hotkeys.quick_price}"
             )
 
-    def _poll_events(self) -> None:
+    def _post_event(self, event: object) -> None:
+        self.events.put(event)
+        try:
+            self.root.after(0, self._drain_events)
+        except Exception:
+            pass
+
+    def _drain_events(self) -> None:
+        if self._draining_events:
+            return
+        self._draining_events = True
         try:
             while True:
                 event = self.events.get_nowait()
@@ -2302,7 +2514,6 @@ class PriceTrackerApp:
                         self.config.ocr_engine = "rapidocr"
                         self.ocr_status_var.set(engine_name or "截图识别已准备好")
                         save_config(self.config)
-                        self.ocr = RapidOcr()
                         self._set_progress_idle("截图识别已准备好")
                         self.status_var.set("截图识别已准备好。")
                         messagebox.showinfo("截图识别", "截图识别已准备好。")
@@ -2312,35 +2523,44 @@ class PriceTrackerApp:
                 elif isinstance(event, tuple) and event[0] == "ocr_recognized":
                     _kind, ok, rows, raw_text, crop_path, message = event
                     self._set_ocr_running_ui(False)
-                    self.ocr_review_raw_text = raw_text
-                    self.ocr_review_image_path = Path(crop_path)
+                    show_review_details = self._should_update_ocr_review_page()
+                    if show_review_details:
+                        self.ocr_review_raw_text = raw_text
+                        self.ocr_review_image_path = Path(crop_path)
+                    else:
+                        self._clear_ocr_review_data()
                     if ok:
-                        self.ocr_review_rows = rows
-                        if self._should_update_ocr_review_page():
+                        if show_review_details:
+                            self.ocr_review_rows = rows
                             self.show_ocr_review_page()
                         self._set_progress_idle(f"截图识别完成：{len(rows)} 条。")
                         self.status_var.set(f"截图识别完成：{len(rows)} 条，请确认后保存。")
                     else:
                         self.ocr_review_rows = []
-                        if self._should_update_ocr_review_page() and getattr(self, "current_page_name", "") == "ocr":
+                        if show_review_details and getattr(self, "current_page_name", "") == "ocr":
                             self.show_ocr_review_page()
                         self._set_progress_idle("截图识别未得到结果")
                         self.status_var.set(message or "截图识别未得到结果。")
                 elif isinstance(event, tuple) and event[0] == "screenshot_lookup_done":
                     _kind, ok, rows, lookup_rows, raw_text, crop_path, message = event
                     self._set_ocr_running_ui(False)
-                    self.ocr_review_rows = rows
-                    self.ocr_review_raw_text = raw_text
-                    self.ocr_review_image_path = Path(crop_path)
-                    self.ocr_selected_index = None
+                    self._area_capture_active = False
+                    show_review_details = self._should_update_ocr_review_page()
+                    if show_review_details:
+                        self.ocr_review_rows = rows
+                        self.ocr_review_raw_text = raw_text
+                        self.ocr_review_image_path = Path(crop_path)
+                        self.ocr_selected_index = None
+                    else:
+                        self._clear_ocr_review_data()
                     if (
-                        self._should_update_ocr_review_page()
+                        show_review_details
                         and getattr(self, "current_page_name", "") == "ocr"
                         and self._restore_after_area_capture
                     ):
                         self.show_ocr_review_page()
                     elif (
-                        self._should_update_ocr_review_page()
+                        show_review_details
                         and getattr(self, "current_page_name", "") == "ocr"
                         and self.root.state() != "withdrawn"
                     ):
@@ -2380,7 +2600,12 @@ class PriceTrackerApp:
                     self.toggle_focus_search_overlay()
         except queue.Empty:
             pass
-        self.root.after(120, self._poll_events)
+        finally:
+            self._draining_events = False
+
+    def _poll_events(self) -> None:
+        self._drain_events()
+        self.root.after(60, self._poll_events)
 
     def search(self) -> None:
         self.refresh_market_table()
@@ -2579,13 +2804,14 @@ class PriceTrackerApp:
         self._configure_screenshot_lookup_scroll(46, False)
         self._position_screenshot_lookup_overlay(126)
         self._animate_screenshot_lookup_loading()
-        overlay.lift()
+        self._show_screenshot_lookup_overlay(overlay)
 
     def _ensure_screenshot_lookup_overlay(self) -> Toplevel | None:
         if self.screenshot_lookup_overlay is not None and self._toplevel_exists(self.screenshot_lookup_overlay):
             return self.screenshot_lookup_overlay
         overlay = Toplevel(self.root)
         self.screenshot_lookup_overlay = overlay
+        overlay.withdraw()
         overlay.overrideredirect(True)
         overlay.attributes("-topmost", True)
         try:
@@ -2637,7 +2863,8 @@ class PriceTrackerApp:
 
         result_box = Frame(container, bg="#ffffff")
         result_box.pack(fill=BOTH, expand=True, pady=(8, 0))
-        result_canvas = Canvas(result_box, bg="#ffffff", highlightthickness=0)
+        result_canvas = Canvas(result_box, bg="#ffffff", highlightthickness=0, takefocus=1)
+        result_canvas.bind("<Escape>", lambda _event: self.destroy_screenshot_lookup_overlay())
         result_scrollbar = ttk.Scrollbar(result_box, orient="vertical", command=result_canvas.yview)
         result_inner = Frame(result_canvas, bg="#ffffff")
         result_window = result_canvas.create_window((0, 0), window=result_inner, anchor="nw")
@@ -2653,14 +2880,39 @@ class PriceTrackerApp:
         self.screenshot_lookup_result_window = result_window
         self.screenshot_lookup_results_scrollbar = result_scrollbar
         self._position_screenshot_lookup_overlay(126)
-        overlay.after(30, lambda: self._focus_screenshot_lookup_overlay(overlay))
         return overlay
+
+    def _show_screenshot_lookup_overlay(self, overlay: Toplevel) -> None:
+        try:
+            if not overlay.winfo_exists():
+                return
+            overlay.update_idletasks()
+            overlay.deiconify()
+            overlay.lift()
+            self._focus_screenshot_lookup_overlay(overlay)
+            self.root.after(40, lambda: self._focus_screenshot_lookup_overlay(overlay))
+        except Exception:
+            pass
+
+    def _handle_overlay_escape(self, _event=None) -> str | None:
+        if self.screenshot_lookup_overlay is not None and self._toplevel_exists(self.screenshot_lookup_overlay):
+            self.destroy_screenshot_lookup_overlay()
+            return "break"
+        if self.quick_price_overlay is not None and self._toplevel_exists(self.quick_price_overlay):
+            self._destroy_quick_price_overlay()
+            return "break"
+        if self._focus_search_overlay_exists():
+            self.destroy_focus_search_overlay()
+            return "break"
+        return None
 
     def _focus_screenshot_lookup_overlay(self, overlay: Toplevel) -> None:
         try:
             if overlay.winfo_exists():
                 overlay.lift()
                 overlay.focus_force()
+                target = self.screenshot_lookup_results_canvas or overlay
+                target.focus_set()
         except Exception:
             pass
 
@@ -2749,7 +3001,7 @@ class PriceTrackerApp:
             self._bind_screenshot_lookup_drag_recursive(box)
             self._configure_screenshot_lookup_scroll(68, False)
             self._position_screenshot_lookup_overlay(150)
-            overlay.lift()
+            self._show_screenshot_lookup_overlay(overlay)
             return
 
         for index, (row_data, confidence, raw_text) in enumerate(rows):
@@ -2758,7 +3010,7 @@ class PriceTrackerApp:
         result_height = self._measure_screenshot_lookup_result_height(visible_rows)
         self._configure_screenshot_lookup_scroll(result_height, len(rows) > 5)
         self._position_screenshot_lookup_overlay(104 + result_height)
-        overlay.lift()
+        self._show_screenshot_lookup_overlay(overlay)
         self._focus_screenshot_lookup_overlay(overlay)
 
     def _render_screenshot_lookup_row(self, index: int, row_data: MarketRow, confidence: float, raw_text: str) -> None:
@@ -3315,47 +3567,45 @@ class PriceTrackerApp:
         )
 
     def start_area_capture(self, restore_after: bool = False) -> None:
+        if self._area_capture_active:
+            self.status_var.set("截图识别正在进行中。")
+            return
+        self._area_capture_active = True
         self._restore_after_area_capture = restore_after
         self.root.withdraw()
-        self.root.after(160, self._capture_for_selection)
+        self.root.update_idletasks()
+        self.root.after(25, self._capture_for_selection)
 
     def _capture_for_selection(self) -> None:
         try:
-            image_path = capture_full_screen(
-                self.config.screenshots_path,
-                "selection",
-                max_files=self._screenshot_retention_count(),
-            )
+            screenshot = capture_full_screen_image()
         except Exception as exc:
+            self._area_capture_active = False
             if self._restore_after_area_capture:
                 self.root.deiconify()
             messagebox.showerror("截图失败", str(exc))
             return
         ScreenshotSelectionOverlay(
             self.root,
-            image_path,
+            screenshot,
             self._recognize_selected_area,
-            on_cancel=lambda: self.root.deiconify() if self._restore_after_area_capture else None,
+            on_cancel=self._cancel_area_capture,
         )
 
-    def _recognize_selected_area(self, image_path: Path, box: tuple[int, int, int, int]) -> None:
+    def _cancel_area_capture(self) -> None:
+        self._area_capture_active = False
         if self._restore_after_area_capture:
             self.root.deiconify()
-        try:
-            crop_path = crop_image(
-                image_path,
-                box,
-                self.config.screenshots_path,
-                "selected-area",
-                enhance=False,
-                max_files=self._screenshot_retention_count(),
-            )
-        except Exception as exc:
-            messagebox.showerror("裁剪失败", str(exc))
-            return
+
+    def _recognize_selected_area(self, image_source: Path | Image.Image, box: tuple[int, int, int, int]) -> None:
+        if self._restore_after_area_capture:
+            self.root.deiconify()
+        self._begin_selected_area_lookup(image_source, box)
+
+    def _begin_selected_area_lookup(self, image_source: Path | Image.Image, box: tuple[int, int, int, int]) -> None:
         self.ocr_review_rows = []
         self.ocr_review_raw_text = ""
-        self.ocr_review_image_path = crop_path
+        self.ocr_review_image_path = Path()
         self.ocr_selected_index = None
         if self._should_update_ocr_review_page() and self._restore_after_area_capture:
             self.show_ocr_review_page()
@@ -3366,22 +3616,31 @@ class PriceTrackerApp:
         self.show_screenshot_lookup_loading()
         self._set_progress_busy("正在识别截图内容...")
         self.status_var.set("正在识别截图内容，请稍候。")
-        threading.Thread(target=self._recognize_selected_area_worker, args=(crop_path,), daemon=True).start()
+        threading.Thread(
+            target=self._recognize_selected_area_worker_fast,
+            args=(image_source, box),
+            daemon=True,
+        ).start()
 
-    def _recognize_selected_area_worker(self, crop_path: Path) -> None:
+    def _recognize_selected_area_worker_fast(self, image_source: Path | Image.Image, box: tuple[int, int, int, int]) -> None:
         worker_db = None
+        crop_path = Path()
+        previous_priority = None
         try:
-            ocr = RapidOcr()
-            try:
-                ocr_path = prepare_image_for_ocr(
-                    crop_path,
-                    self.config.screenshots_path,
-                    "selected-area-ocr",
-                    max_files=self._screenshot_retention_count(),
-                )
-            except Exception:
-                ocr_path = crop_path
-            result = ocr.recognize(ocr_path)
+            if getattr(self.config, "ocr_low_priority", True):
+                previous_priority = self._set_ocr_process_priority(True)
+            crop_path, ocr_path = crop_and_prepare_for_ocr(
+                image_source,
+                box,
+                self.config.screenshots_path,
+                "selected-area",
+                "selected-area-ocr",
+                max_files=self._screenshot_retention_count(),
+            )
+            with self.ocr_lock:
+                result = self.ocr.recognize(ocr_path)
+            self._restore_process_priority(previous_priority)
+            previous_priority = None
             worker_db = PriceDatabase(self.config.database_path)
             rows = recognize_structured_prices(ocr_path, result, db=worker_db, default_currency="崇高石")
             if not rows:
@@ -3392,7 +3651,7 @@ class PriceTrackerApp:
                 message = result.message or "没有识别到价格列表。请尝试框得更紧一些，或在配置中检查截图识别功能。"
             else:
                 message = ""
-            self.events.put(
+            self._post_event(
                 (
                     "screenshot_lookup_done",
                     bool(rows),
@@ -3404,8 +3663,9 @@ class PriceTrackerApp:
                 )
             )
         except Exception as exc:
-            self.events.put(("screenshot_lookup_done", False, [], [], "", str(crop_path), str(exc)))
+            self._post_event(("screenshot_lookup_done", False, [], [], "", str(crop_path), str(exc)))
         finally:
+            self._restore_process_priority(previous_priority)
             if worker_db is not None:
                 worker_db.close()
 
@@ -3495,7 +3755,7 @@ class PriceTrackerApp:
             messagebox.showerror("截图失败", str(exc))
             return None, Path(), str(exc)
 
-        self.ocr = RapidOcr()
+        self.ocr = self._make_ocr_engine()
         ocr_result = self.ocr.recognize(image_path)
         parsed = parse_ocr_text(ocr_result.text)
         message = ocr_result.message
@@ -3524,7 +3784,7 @@ class PriceTrackerApp:
             messagebox.showerror("图片预处理失败", str(exc))
             return
 
-        self.ocr = RapidOcr()
+        self.ocr = self._make_ocr_engine()
         ocr_result = self.ocr.recognize(prepared_path)
         parsed = parse_ocr_text(ocr_result.text)
         self._show_ocr_diagnostic(Path(path), prepared_path, parsed, ocr_result.message)
@@ -3583,7 +3843,7 @@ class PriceTrackerApp:
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.root, self.config)
         self.root.wait_window(dialog.window)
-        self.ocr = RapidOcr()
+        self.ocr = self._make_ocr_engine()
         self.reload_hotkeys()
         self.status_var.set(f"设置已加载。数据目录：{self.config.data_path}")
 
@@ -3796,10 +4056,7 @@ class PriceTrackerApp:
     def _ensure_tray_icon(self) -> None:
         if pystray is None or self.tray_icon is not None:
             return
-        image = Image.new("RGB", (64, 64), "#2f80ed")
-        draw = ImageDraw.Draw(image)
-        draw.rounded_rectangle((8, 8, 56, 56), radius=12, fill="#ffffff")
-        draw.text((19, 19), "P2", fill="#2f80ed")
+        image = self._load_app_icon_image(64)
 
         def restore(_icon=None, _item=None):
             self.root.after(0, self.restore_from_tray)
