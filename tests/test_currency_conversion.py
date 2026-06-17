@@ -43,6 +43,22 @@ def test_market_search_splits_terms_with_and_logic():
         db.close()
 
 
+def test_market_trend_uses_local_history_when_enough_points_exist():
+    db = PriceDatabase(Path(":memory:"))
+    try:
+        db.add_price_record("崇高石", 10, "金币", "poe2db", raw_text="trend=+90%")
+        db.add_price_record("崇高石", 15, "金币", "poe2db", raw_text="trend=+90%")
+        db.add_price_record("崇高石", 20, "金币", "poe2db", raw_text="trend=+90%")
+        db.add_price_record("神圣石", 1, "崇高石", "poe2db", raw_text="trend=-12%")
+
+        rows = {row.item_name: row for row in db.get_market_rows(limit=10)}
+
+        assert rows["崇高石"].trend_percent == "+100%"
+        assert rows["神圣石"].trend_percent == "-12%"
+    finally:
+        db.close()
+
+
 def test_ctrl_space_hotkey_is_supported():
     modifiers, key = parse_hotkey("Ctrl+Space")
 

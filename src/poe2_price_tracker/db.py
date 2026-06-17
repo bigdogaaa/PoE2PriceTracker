@@ -541,7 +541,15 @@ class PriceDatabase:
         result = []
         for row in rows:
             history = self.get_price_history(str(row["item_name"]), limit=12)
+            history_currency = str(row["latest_currency"])
+            conversion_rate = self.get_exalted_per_divine()
+            history_values = [
+                convert_amount(record.amount, record.currency, history_currency, conversion_rate)
+                for record in history
+            ]
             trend_match = __import__("re").search(r"trend=([+-]?\d+(?:\.\d+)?%)", str(row["latest_raw_text"]))
+            local_trend = trend_percent(history_values)
+            display_trend = local_trend if len(history_values) >= 2 else (trend_match.group(1) if trend_match else "")
             result.append(
                 MarketRow(
                     item_id=int(row["item_id"]),
@@ -555,8 +563,8 @@ class PriceDatabase:
                     min_amount=float(row["min_amount"]),
                     max_amount=float(row["max_amount"]),
                     avg_amount=float(row["avg_amount"]),
-                    sparkline=sparkline([record.amount for record in history]),
-                    trend_percent=trend_match.group(1) if trend_match else trend_percent([record.amount for record in history]),
+                    sparkline=sparkline(history_values),
+                    trend_percent=display_trend,
                     favorite=bool(row["favorite"]),
                     pinned=bool(row["pinned"]),
                 )

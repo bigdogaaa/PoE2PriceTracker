@@ -2098,8 +2098,12 @@ class PriceTrackerApp:
                 ),
                 tags=("pinned",) if row.pinned else (),
             )
-            history = [record.amount for record in self.db.get_price_history(row.item_name, limit=8)]
-            self.trend_data[row.item_name] = (history, row.trend_percent)
+            history = [
+                convert_amount(record.amount, record.currency, row.latest_currency, rate)
+                for record in self.db.get_price_history(row.item_name, limit=12)
+            ]
+            trend_values = history if len(history) >= 3 else []
+            self.trend_data[row.item_name] = (trend_values, row.trend_percent)
         self._apply_visible_columns()
         self._update_market_headings()
         self.root.update_idletasks()
@@ -2228,30 +2232,43 @@ class PriceTrackerApp:
             if not bbox:
                 continue
             x, y, width, height = bbox
+            if width <= 8 or height <= 8:
+                continue
             values, percent = self.trend_data.get(iid, ([], ""))
             tags = self.market_tree.item(iid, "tags")
             bg = "#fff7d6" if "pinned" in tags else "#ffffff"
-            canvas = Canvas(self.market_tree, width=width - 6, height=height - 6, highlightthickness=0, bg=bg)
-            canvas.place(x=x + 3, y=y + 3)
-            self._draw_trend(canvas, values, percent, width - 6, height - 6)
+            canvas_w = max(1, width - 4)
+            canvas_h = max(1, height - 4)
+            canvas = Canvas(self.market_tree, width=canvas_w, height=canvas_h, highlightthickness=0, bg=bg)
+            canvas.place(x=x + 2, y=y + 2)
+            self._draw_trend(canvas, values, percent, canvas_w, canvas_h)
             self.trend_widgets.append(canvas)
 
     def _draw_trend(self, canvas: Canvas, values: list[float], percent: str, width: int, height: int) -> None:
-        color = "#18a058"
-        if percent.startswith("-"):
+        color = "#7b8794"
+        if percent.startswith("+"):
+            color = "#18a058"
+        elif percent.startswith("-"):
             color = "#d03050"
-        if len(values) >= 2:
+        canvas.create_rectangle(0, 0, width, height, fill=str(canvas["bg"]), outline="")
+        percent_width = 0
+        if percent:
+            percent_width = min(56, max(40, 9 * len(percent) + 8))
+        chart_left = 6
+        chart_right = width - percent_width - 8
+        chart_width = chart_right - chart_left
+        if len(values) >= 3 and chart_width >= 34 and height >= 16:
             low, high = min(values), max(values)
             span = high - low or 1
             points = []
-            usable_w = max(32, width - 52)
+            usable_h = max(8, height - 12)
             for index, value in enumerate(values):
-                px = 4 + index * usable_w / max(1, len(values) - 1)
-                py = height - 8 - (value - low) / span * max(10, height - 16)
-                points.extend((px, py))
-            canvas.create_line(*points, fill=color, width=2, smooth=True)
+                px = chart_left + index * chart_width / max(1, len(values) - 1)
+                py = height - 6 - (value - low) / span * usable_h
+                points.extend((round(px, 1), round(max(3, min(height - 3, py)), 1)))
+            canvas.create_line(*points, fill=color, width=2, smooth=True, capstyle="round", joinstyle="round")
         if percent:
-            canvas.create_text(width - 4, height / 2, text=percent, anchor="e", fill=color, font=("Microsoft YaHei UI", 10, "bold"))
+            canvas.create_text(width - 6, height / 2, text=percent, anchor="e", fill=color, font=("Microsoft YaHei UI", 9, "bold"))
 
     def _auto_fit_market_columns(self) -> None:
         if not self._has_market_tree():
