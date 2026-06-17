@@ -76,6 +76,58 @@ https://poe2db.tw/cn/Economy
 - 结合内置通货图标推断单位
 - 将识别结果确认后写入本地数据库
 
+## 界面预览
+
+### 物价列表
+
+物价列表是软件的主页面，适合查看、搜索、排序和收藏同步后的价格数据。
+
+![物价列表](docs/images/price-list-overview.png)
+
+物价列表支持按列排序、走势查看、来源筛选、分页和收藏操作。
+
+![物价列表说明](docs/images/price-list-guide.png)
+
+### 收藏列表
+
+收藏列表用于集中查看自己重点关注的物品。
+
+![收藏列表](docs/images/favorite-list-overview.png)
+
+![收藏列表说明](docs/images/favorite-guide.png)
+
+### 游戏内快速查价
+
+在游戏中复制物品信息后，可以通过快捷键查询本地价格，并显示悬浮查价窗口。
+
+![游戏内快速查价](docs/images/in-game-price-popup.png)
+
+### 焦点搜索
+
+焦点搜索用于快速输入关键词并查看前几条匹配结果，适合在不切换主界面的情况下查价。
+
+![焦点搜索](docs/images/focus-search-guide.png)
+
+### 手动记录
+
+手动记录适合补充自己观察到的价格，或记录暂时没有同步到的数据。
+
+![手动记录](docs/images/manual-record-guide.png)
+
+### 截图识别
+
+截图识别页面用于选择截图区域、查看识别过程，并确认识别出的物品、价格和单位。
+
+![截图识别](docs/images/screenshot-recognition-guide.png)
+
+### 配置
+
+配置页用于调整快捷键、窗口行为、显示效果、OCR 相关选项和本地数据维护功能。
+
+![配置页](docs/images/settings-page.png)
+
+![配置说明](docs/images/config-guide.png)
+
 ## 下载
 
 最新版可在 GitHub Release 页面下载：
