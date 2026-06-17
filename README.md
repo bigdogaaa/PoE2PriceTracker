@@ -32,19 +32,13 @@ python -m venv .venv
 
 快捷键不会向游戏发送输入，只在工具侧触发截图和查询。
 
-## OCR
+## 截图识别
 
-OCR 默认使用本地 Tesseract。程序会优先查找已配置路径、打包内置路径、系统常见安装路径。
+截图识别默认使用内置识别能力，打包后会随程序一起提供。
 
-在「配置」页可以点击「自动准备 OCR」：程序会从配置的 OCR 包地址下载到本机软件数据目录，自动解压或静默安装，并补齐中文简体与英文语言包。
+配置页中的「提前准备」会预先加载截图识别能力，减少第一次识别时的等待。
 
-默认 OCR 包地址指向本项目 Gitee release 附件：
-
-```text
-https://gitee.com/BiGDoGaaa/poe2-price-tracker-release/releases/download/ocr/tesseract-win64-chi-sim.zip
-```
-
-OCR 二进制不提交到源码仓库。发布 OCR 包时，zip 内需要包含 `tesseract.exe`，程序会自动递归查找并配置。
+截图列表识别会优先使用识别框坐标做结构分析：先按行分组，再划分物品名、价格数字和单位图标区域。程序内置 poe2db 通货图标，并在启动时维护到 SQLite；同步 poe2db 经济数据只更新价格，不更新图标模板。
 
 ## 数据位置
 
@@ -97,11 +91,11 @@ installer\PoE2PriceTracker.iss
 
 更新流程：检查版本、下载 zip、校验 sha256、解压到本机更新目录，然后提示启动新版并退出当前版本。它不会覆盖正在运行的 exe。
 
-正式发布到 Gitee release 时，可以生成带公开下载地址的 manifest：
+正式发布到 GitHub release 时，可以生成带公开下载地址的 manifest：
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File .\scripts\make_release.ps1 `
-  -Version 0.2.6 `
-  -AppName PoE2PriceTracker-0.2.6 `
-  -DownloadBaseUrl "https://gitee.com/BiGDoGaaa/poe2-price-tracker-release/releases/download/latest"
+  -Version 0.3.18 `
+  -AppName PoE2PriceTracker-0.3.18 `
+  -DownloadBaseUrl "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.3.18"
 ```

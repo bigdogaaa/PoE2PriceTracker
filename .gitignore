@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+pytest-cache-files-*/
 .mypy_cache/
 .ruff_cache/
 
@@ -34,6 +35,10 @@ tmp_ocr/
 tools/ocr/
 Tesseract/
 Tesseract安装后/
+
+# Local screenshots and visual test captures
+.tmp-ui-shot.png
+符文识别功能测试图片/
 
 # IDE and OS files
 .idea/

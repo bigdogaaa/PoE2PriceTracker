@@ -1,5 +1,5 @@
 #define MyAppName "PoE2 Price Tracker"
-#define MyAppVersion "0.2.7"
+#define MyAppVersion "0.3.18"
 #define MyAppPublisher "Local"
 #define MyAppExeName "PoE2PriceTracker.exe"
 
@@ -25,7 +25,7 @@ Name: "english"; MessagesFile: "compiler:Default.isl"
 Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{cm:AdditionalIcons}"; Flags: unchecked
 
 [Files]
-Source: "..\dist\PoE2PriceTracker.exe"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\dist\PoE2PriceTracker-{#MyAppVersion}.exe"; DestDir: "{app}"; DestName: "{#MyAppExeName}"; Flags: ignoreversion
 
 [Icons]
 Name: "{group}\{#MyAppName}"; Filename: "{app}\{#MyAppExeName}"

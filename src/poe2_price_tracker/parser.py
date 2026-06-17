@@ -87,6 +87,16 @@ class ParsedItemPrice:
     currency: str
     raw_text: str
     trend_percent: str = ""
+    item_page_url: str = ""
+    item_icon_url: str = ""
+    currency_page_url: str = ""
+    currency_icon_url: str = ""
+    item_icon_path: str = ""
+    currency_icon_path: str = ""
+    item_icon_phash: str = ""
+    currency_icon_phash: str = ""
+    item_match_score: float = 0.0
+    currency_match_score: float = 0.0
 
 
 def clean_line(line: str) -> str:

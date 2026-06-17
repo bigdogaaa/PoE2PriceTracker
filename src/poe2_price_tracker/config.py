@@ -8,8 +8,10 @@ from typing import Any
 
 
 APP_DIR_NAME = "PoE2PriceTracker"
-RELEASE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker-release/releases/download"
-SOURCE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download"
+GITHUB_RELEASE_BASE = "https://github.com/bigdogaaa/PoE2PriceTracker/releases"
+UPDATE_MANIFEST_URL = f"{GITHUB_RELEASE_BASE}/latest/download/latest.json"
+LEGACY_RELEASE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker-release/releases/download"
+LEGACY_SOURCE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download"
 
 
 def default_data_dir() -> Path:
@@ -23,7 +25,8 @@ def default_data_dir() -> Path:
 class HotkeyConfig:
     lookup_hovered: str = "F1"
     capture_price: str = "F2"
-    focus_search: str = "F3"
+    focus_search: str = "Ctrl+Space"
+    quick_price: str = "F4"
 
 
 @dataclass
@@ -31,21 +34,20 @@ class AppConfig:
     data_dir: str = str(default_data_dir())
     screenshot_width: int = 760
     screenshot_height: int = 520
-    tesseract_cmd: str = "tesseract"
-    ocr_install_dir: str = ""
-    ocr_download_url: str = f"{RELEASE_REPO_DOWNLOAD_BASE}/ocr/tesseract-win64-chi-sim.zip"
-    ocr_languages: str = "chi_sim+eng"
-    ocr_psm: int = 6
+    ocr_engine: str = "rapidocr"
     font_size: int = 15
     display_currency: str = "神圣石"
     page_size: int = 25
+    focus_search_rounded: bool = True
+    focus_search_limit: int = 5
     manual_add_favorite: bool = True
+    preload_ocr_on_start: bool = False
     minimize_action: str = "ask"
     close_action: str = "ask"
     visible_columns: list[str] = field(
-        default_factory=lambda: ["序号", "物品", "价格", "单位", "走势", "记录", "来源", "更新时间", "收藏"]
+        default_factory=lambda: ["序号", "图标", "物品", "价格", "单位", "走势", "记录", "来源", "更新时间", "收藏"]
     )
-    update_manifest: str = f"{RELEASE_REPO_DOWNLOAD_BASE}/latest/latest.json"
+    update_manifest: str = UPDATE_MANIFEST_URL
     hotkeys: HotkeyConfig = field(default_factory=HotkeyConfig)
 
     @property
@@ -90,26 +92,43 @@ def load_config() -> AppConfig:
     if loaded.hotkeys.capture_price == "Ctrl+Alt+O":
         loaded.hotkeys.capture_price = "F2"
     if loaded.hotkeys.focus_search == "Ctrl+Alt+F":
-        loaded.hotkeys.focus_search = "F3"
+        loaded.hotkeys.focus_search = "Ctrl+Space"
+    if loaded.hotkeys.focus_search == "F3":
+        loaded.hotkeys.focus_search = "Ctrl+Space"
     if loaded.font_size < 15:
         loaded.font_size = 15
     if loaded.page_size == 50:
         loaded.page_size = 25
-    if "digi.bib.uni-mannheim.de" in loaded.ocr_download_url or SOURCE_REPO_DOWNLOAD_BASE in loaded.ocr_download_url:
-        loaded.ocr_download_url = config.ocr_download_url
-    if not loaded.update_manifest.strip() or SOURCE_REPO_DOWNLOAD_BASE in loaded.update_manifest:
+    try:
+        loaded.focus_search_limit = max(1, min(10, int(loaded.focus_search_limit or 5)))
+    except (TypeError, ValueError):
+        loaded.focus_search_limit = 5
+    if "图标" not in loaded.visible_columns:
+        try:
+            index = loaded.visible_columns.index("物品")
+        except ValueError:
+            index = 1
+        loaded.visible_columns.insert(index, "图标")
+    if loaded.ocr_engine != "rapidocr":
+        loaded.ocr_engine = "rapidocr"
+    if (
+        not loaded.update_manifest.strip()
+        or LEGACY_SOURCE_REPO_DOWNLOAD_BASE in loaded.update_manifest
+        or LEGACY_RELEASE_REPO_DOWNLOAD_BASE in loaded.update_manifest
+    ):
         loaded.update_manifest = config.update_manifest
-    if loaded.tesseract_cmd.strip() == "":
-        loaded.tesseract_cmd = config.tesseract_cmd
     ensure_dirs(loaded)
     save_config(loaded)
     return loaded
 
 
 def save_config(config: AppConfig) -> None:
-    ensure_dirs(config)
-    with config.config_path.open("w", encoding="utf-8") as fh:
-        json.dump(asdict(config), fh, ensure_ascii=False, indent=2)
+    try:
+        ensure_dirs(config)
+        with config.config_path.open("w", encoding="utf-8") as fh:
+            json.dump(asdict(config), fh, ensure_ascii=False, indent=2)
+    except OSError:
+        return
 
 
 def ensure_dirs(config: AppConfig) -> None:

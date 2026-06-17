@@ -72,7 +72,13 @@ def capture_full_screen(output_dir: Path, prefix: str = "screen") -> Path:
     return path
 
 
-def crop_image(source_path: Path, box: tuple[int, int, int, int], output_dir: Path, prefix: str) -> Path:
+def crop_image(
+    source_path: Path,
+    box: tuple[int, int, int, int],
+    output_dir: Path,
+    prefix: str,
+    enhance: bool = True,
+) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     image = Image.open(source_path)
     left, top, right, bottom = box
@@ -81,8 +87,8 @@ def crop_image(source_path: Path, box: tuple[int, int, int, int], output_dir: Pa
     if bottom < top:
         top, bottom = bottom, top
     cropped = image.crop((left, top, right, bottom))
-    enhanced = enhance_for_ocr(cropped)
+    output = enhance_for_ocr(cropped) if enhance else cropped
     stamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     path = output_dir / f"{prefix}-{stamp}.png"
-    enhanced.save(path)
+    output.save(path)
     return path

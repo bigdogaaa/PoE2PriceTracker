@@ -15,6 +15,10 @@ def normalize_name(name: str) -> str:
     return " ".join(name.strip().lower().split())
 
 
+def search_terms(query: str) -> list[str]:
+    return [term for term in normalize_name(query).split(" ") if term]
+
+
 @dataclass(frozen=True)
 class PriceRecord:
     id: int
@@ -42,7 +46,9 @@ class PriceStats:
 
 @dataclass(frozen=True)
 class MarketRow:
+    item_id: int
     item_name: str
+    item_icon_path: str
     latest_amount: float
     latest_currency: str
     latest_at: str
@@ -57,11 +63,22 @@ class MarketRow:
     pinned: bool
 
 
+@dataclass(frozen=True)
+class IconAsset:
+    name: str
+    kind: str
+    page_url: str
+    icon_url: str
+    local_path: str
+    phash: str
+
+
 class PriceDatabase:
     def __init__(self, path: Path):
         self.path = path
-        self.path.parent.mkdir(parents=True, exist_ok=True)
-        self.conn = sqlite3.connect(self.path)
+        if str(self.path) != ":memory:":
+            self.path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(str(self.path))
         self.conn.row_factory = sqlite3.Row
         self.migrate()
 
@@ -106,6 +123,22 @@ class PriceDatabase:
                 item_id INTEGER PRIMARY KEY REFERENCES items(id),
                 created_at TEXT NOT NULL
             );
+
+            CREATE TABLE IF NOT EXISTS icon_assets (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL,
+                normalized_name TEXT NOT NULL,
+                kind TEXT NOT NULL,
+                page_url TEXT NOT NULL DEFAULT '',
+                icon_url TEXT NOT NULL DEFAULT '',
+                local_path TEXT NOT NULL DEFAULT '',
+                phash TEXT NOT NULL DEFAULT '',
+                updated_at TEXT NOT NULL,
+                UNIQUE(normalized_name, kind)
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_icon_assets_lookup
+                ON icon_assets(kind, normalized_name);
             """
         )
         self.conn.commit()
@@ -162,19 +195,79 @@ class PriceDatabase:
         self.conn.commit()
         return int(cur.lastrowid)
 
-    def search_items(self, query: str, limit: int = 12) -> list[str]:
-        normalized = normalize_name(query)
-        if not normalized:
-            return []
-        rows = self.conn.execute(
+    def upsert_latest_price_record(
+        self,
+        item_name: str,
+        amount: float,
+        currency: str,
+        source: str,
+        confidence: float = 0,
+        raw_text: str = "",
+        screenshot_path: str = "",
+    ) -> int:
+        item_id = self.upsert_item(item_name)
+        row = self.conn.execute(
             """
+            SELECT id FROM price_records
+            WHERE item_id = ?
+            ORDER BY captured_at DESC, id DESC
+            LIMIT 1
+            """,
+            (item_id,),
+        ).fetchone()
+        if row is None:
+            return self.add_price_record(
+                item_name,
+                amount,
+                currency,
+                source,
+                confidence=confidence,
+                raw_text=raw_text,
+                screenshot_path=screenshot_path,
+            )
+        record_id = int(row["id"])
+        self.conn.execute(
+            """
+            UPDATE price_records
+            SET amount = ?,
+                currency = ?,
+                source = ?,
+                captured_at = ?,
+                confidence = ?,
+                raw_text = ?,
+                screenshot_path = ?
+            WHERE id = ?
+            """,
+            (
+                float(amount),
+                currency.strip(),
+                source,
+                utc_now(),
+                float(confidence),
+                raw_text,
+                screenshot_path,
+                record_id,
+            ),
+        )
+        self.conn.commit()
+        return record_id
+
+    def search_items(self, query: str, limit: int = 12) -> list[str]:
+        terms = search_terms(query)
+        if not terms:
+            return []
+        where = " AND ".join("normalized_name LIKE ?" for _term in terms)
+        params = [f"%{term}%" for term in terms]
+        params.append(limit)
+        rows = self.conn.execute(
+            f"""
             SELECT name, normalized_name
             FROM items
-            WHERE normalized_name LIKE ?
+            WHERE {where}
             ORDER BY updated_at DESC
             LIMIT ?
             """,
-            (f"%{normalized}%", limit),
+            tuple(params),
         ).fetchall()
         direct = [str(row["name"]) for row in rows]
         if len(direct) >= limit:
@@ -190,11 +283,42 @@ class PriceDatabase:
             norm = str(row["normalized_name"])
             if norm in existing:
                 continue
-            score = SequenceMatcher(None, normalized, norm).ratio()
+            score = min(SequenceMatcher(None, term, norm).ratio() for term in terms)
             if score >= 0.45:
                 scored.append((score, name))
         scored.sort(reverse=True)
         return direct + [name for _, name in scored[: max(0, limit - len(direct))]]
+
+    def match_item_name(self, query: str, min_score: float = 0.72) -> tuple[str, float]:
+        normalized = normalize_name(query)
+        if not normalized:
+            return "", 0.0
+        rows = self.conn.execute(
+            """
+            SELECT name, normalized_name FROM items
+            UNION
+            SELECT name, normalized_name FROM icon_assets WHERE kind IN ('item', 'currency')
+            """
+        ).fetchall()
+        best_name = ""
+        best_score = 0.0
+        try:
+            from rapidfuzz import fuzz
+
+            for row in rows:
+                score = fuzz.WRatio(normalized, str(row["normalized_name"])) / 100.0
+                if score > best_score:
+                    best_score = score
+                    best_name = str(row["name"])
+        except Exception:
+            for row in rows:
+                score = SequenceMatcher(None, normalized, str(row["normalized_name"])).ratio()
+                if score > best_score:
+                    best_score = score
+                    best_name = str(row["name"])
+        if best_score < min_score:
+            return query.strip(), best_score
+        return best_name, best_score
 
     def get_stats(self, item_name: str) -> PriceStats | None:
         normalized = normalize_name(item_name)
@@ -302,9 +426,9 @@ class PriceDatabase:
         direction = "DESC" if descending else "ASC"
         where = []
         params: list[object] = []
-        if query.strip():
+        for term in search_terms(query):
             where.append("i.normalized_name LIKE ?")
-            params.append(f"%{normalize_name(query)}%")
+            params.append(f"%{term}%")
         if source_filter.strip() and source_filter != "全部来源":
             where.append("latest.source = ?")
             params.append(source_filter)
@@ -331,6 +455,7 @@ class PriceDatabase:
                 latest.captured_at AS latest_at,
                 latest.source AS source,
                 latest.raw_text AS latest_raw_text,
+                COALESCE(icon.local_path, '') AS item_icon_path,
                 COUNT(r.id) AS count,
                 MIN(r.amount) AS min_amount,
                 MAX(r.amount) AS max_amount,
@@ -342,6 +467,12 @@ class PriceDatabase:
             JOIN price_records r ON r.item_id = i.id
             LEFT JOIN favorites f ON f.item_id = i.id
             LEFT JOIN pinned_items p ON p.item_id = i.id
+            LEFT JOIN (
+                SELECT normalized_name, MAX(local_path) AS local_path
+                FROM icon_assets
+                WHERE kind IN ('item', 'currency') AND local_path <> ''
+                GROUP BY normalized_name
+            ) icon ON icon.normalized_name = i.normalized_name
             {where_sql}
             GROUP BY i.id
             ORDER BY {sort_expr} {direction}
@@ -355,7 +486,9 @@ class PriceDatabase:
             trend_match = __import__("re").search(r"trend=([+-]?\d+(?:\.\d+)?%)", str(row["latest_raw_text"]))
             result.append(
                 MarketRow(
+                    item_id=int(row["item_id"]),
                     item_name=str(row["item_name"]),
+                    item_icon_path=str(row["item_icon_path"]),
                     latest_amount=float(row["latest_amount"]),
                     latest_currency=str(row["latest_currency"]),
                     latest_at=str(row["latest_at"]),
@@ -375,9 +508,9 @@ class PriceDatabase:
     def count_market_rows(self, query: str = "", source_filter: str = "", favorites_only: bool = False) -> int:
         where = []
         params: list[object] = []
-        if query.strip():
+        for term in search_terms(query):
             where.append("i.normalized_name LIKE ?")
-            params.append(f"%{normalize_name(query)}%")
+            params.append(f"%{term}%")
         if source_filter.strip() and source_filter != "全部来源":
             where.append("latest.source = ?")
             params.append(source_filter)
@@ -411,6 +544,74 @@ class PriceDatabase:
             "SELECT DISTINCT source FROM price_records ORDER BY source"
         ).fetchall()
         return [str(row["source"]) for row in rows]
+
+    def upsert_icon_asset(
+        self,
+        name: str,
+        kind: str,
+        page_url: str = "",
+        icon_url: str = "",
+        local_path: str = "",
+        phash: str = "",
+    ) -> None:
+        now = utc_now()
+        self.conn.execute(
+            """
+            INSERT INTO icon_assets(
+                name, normalized_name, kind, page_url, icon_url, local_path, phash, updated_at
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            ON CONFLICT(normalized_name, kind) DO UPDATE SET
+                name = excluded.name,
+                page_url = COALESCE(NULLIF(excluded.page_url, ''), icon_assets.page_url),
+                icon_url = COALESCE(NULLIF(excluded.icon_url, ''), icon_assets.icon_url),
+                local_path = COALESCE(NULLIF(excluded.local_path, ''), icon_assets.local_path),
+                phash = COALESCE(NULLIF(excluded.phash, ''), icon_assets.phash),
+                updated_at = excluded.updated_at
+            """,
+            (
+                name.strip(),
+                normalize_name(name),
+                kind.strip(),
+                page_url.strip(),
+                icon_url.strip(),
+                local_path.strip(),
+                phash.strip(),
+                now,
+            ),
+        )
+        self.conn.commit()
+
+    def get_icon_assets(self, kind: str = "") -> list[IconAsset]:
+        if kind.strip():
+            rows = self.conn.execute(
+                """
+                SELECT name, kind, page_url, icon_url, local_path, phash
+                FROM icon_assets
+                WHERE kind = ?
+                ORDER BY name
+                """,
+                (kind.strip(),),
+            ).fetchall()
+        else:
+            rows = self.conn.execute(
+                """
+                SELECT name, kind, page_url, icon_url, local_path, phash
+                FROM icon_assets
+                ORDER BY kind, name
+                """
+            ).fetchall()
+        return [
+            IconAsset(
+                name=str(row["name"]),
+                kind=str(row["kind"]),
+                page_url=str(row["page_url"]),
+                icon_url=str(row["icon_url"]),
+                local_path=str(row["local_path"]),
+                phash=str(row["phash"]),
+            )
+            for row in rows
+        ]
 
     def get_exalted_per_divine(self) -> float:
         for name in ("神圣石", "Divine Orb"):

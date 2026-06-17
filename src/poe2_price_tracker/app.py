@@ -2,8 +2,13 @@ from __future__ import annotations
 
 import queue
 import ctypes
+import json
+import re
 import subprocess
+import sys
 import threading
+import time
+from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
 from tkinter import (
@@ -13,6 +18,7 @@ from tkinter import (
     RIGHT,
     TOP,
     X,
+    Y,
     Button,
     Canvas,
     Entry,
@@ -44,15 +50,21 @@ Entry = ttk.Entry
 Radiobutton = ttk.Radiobutton
 Combobox = ttk.Combobox
 
+ERROR_ALREADY_EXISTS = 183
+_INSTANCE_MUTEX_HANDLE = None
+
+from .bundled_assets import seed_bundled_currency_icons
+from . import __version__
 from .config import AppConfig, load_config, save_config
 from .currencies import BASE_CURRENCIES
-from .db import PriceDatabase, PriceStats, convert_amount
+from .clipboard_parser import parse_poe_clipboard_item
+from .db import PriceDatabase, PriceStats, convert_amount, trend_percent
 from .hotkeys import GlobalHotkeys, parse_hotkey
-from .ocr import TesseractOcr
-from .ocr_setup import find_tesseract, prepare_tesseract_ocr
+from .ocr import RapidOcr
 from .parser import ParsedItemPrice, ParsedPrice, find_number, meaningful_lines, parse_item_price_rows, parse_ocr_text
 from .poe2db_sync import fetch_all_economy_prices
 from .screenshot import capture_around_cursor, capture_full_screen, crop_image, prepare_image_for_ocr
+from .structure import recognize_structured_prices
 from .updater import UpdateInfo, check_update, download_update
 
 
@@ -96,7 +108,7 @@ class ConfirmPriceDialog:
         Label(form, text="来源").pack(anchor="w")
         Entry(form, textvariable=self.source_var).pack(fill=X, pady=(0, 8))
 
-        message = f"OCR：{ocr_message}" if ocr_message else "OCR：完成"
+        message = f"识别提示：{ocr_message}" if ocr_message else "识别完成"
         Label(form, text=message, foreground="#555").pack(anchor="w", pady=(0, 4))
         Label(form, text=f"截图：{image_path}").pack(anchor="w", pady=(0, 8))
 
@@ -182,6 +194,8 @@ class HotkeyCaptureButton(Button):
             parts.append(key)
         elif key.startswith("F") and key[1:].isdigit():
             parts.append(key)
+        elif key == "SPACE":
+            parts.append("Space")
         else:
             self.configure(textvariable="", text="不支持这个按键")
             self.after(900, self._cancel)
@@ -207,6 +221,7 @@ class SettingsDialog:
         self.lookup_hotkey_var = StringVar(value=config.hotkeys.lookup_hovered)
         self.capture_hotkey_var = StringVar(value=config.hotkeys.capture_price)
         self.focus_hotkey_var = StringVar(value=config.hotkeys.focus_search)
+        self.quick_hotkey_var = StringVar(value=config.hotkeys.quick_price)
 
         body = Frame(self.window, padx=18, pady=16)
         body.pack(fill=BOTH, expand=True)
@@ -220,6 +235,7 @@ class SettingsDialog:
             ("截图识别实验台", self.lookup_hotkey_var),
             ("截图价格入库", self.capture_hotkey_var),
             ("聚焦搜索框", self.focus_hotkey_var),
+            ("快速查价", self.quick_hotkey_var),
         ]:
             row = Frame(body)
             row.pack(fill=X, pady=(8, 0))
@@ -240,7 +256,7 @@ class SettingsDialog:
 
         Label(
             body,
-            text="程序已按国服中文默认调好 OCR：中文简体 + 英文。通常不需要额外配置。",
+            text="程序已按国服中文默认调好截图识别。通常不需要额外配置。",
             foreground="#555",
             wraplength=540,
             justify=LEFT,
@@ -265,6 +281,7 @@ class SettingsDialog:
             self.lookup_hotkey_var.get().strip(),
             self.capture_hotkey_var.get().strip(),
             self.focus_hotkey_var.get().strip(),
+            self.quick_hotkey_var.get().strip(),
         ]
         try:
             for hotkey in hotkeys:
@@ -273,13 +290,12 @@ class SettingsDialog:
             messagebox.showwarning("快捷键格式错误", str(exc), parent=self.window)
             return
         if len({hotkey.lower() for hotkey in hotkeys}) != len(hotkeys):
-            messagebox.showwarning("快捷键重复", "三个快捷键不能重复。", parent=self.window)
+            messagebox.showwarning("快捷键重复", "快捷键不能重复。", parent=self.window)
             return
-        self.config.ocr_languages = "chi_sim+eng"
-        self.config.ocr_psm = 6
         self.config.hotkeys.lookup_hovered = hotkeys[0]
         self.config.hotkeys.capture_price = hotkeys[1]
         self.config.hotkeys.focus_search = hotkeys[2]
+        self.config.hotkeys.quick_price = hotkeys[3]
         self.config.update_manifest = self.manifest_var.get().strip()
         save_config(self.config)
         self.window.destroy()
@@ -467,7 +483,7 @@ class OcrReviewDialog:
         self.tree.heading("item", text="Item")
         self.tree.heading("amount", text="Price")
         self.tree.heading("currency", text="Currency")
-        self.tree.heading("raw", text="OCR Raw")
+        self.tree.heading("raw", text="原始识别内容")
         self.tree.column("item", width=260)
         self.tree.column("amount", width=100)
         self.tree.column("currency", width=140)
@@ -485,7 +501,7 @@ class OcrReviewDialog:
         actions.pack(fill=X, pady=(12, 0))
         Button(actions, text="入库选中", command=self.save_selected).pack(side=RIGHT)
         Button(actions, text="全部入库", command=self.save_all).pack(side=RIGHT, padx=(0, 8))
-        Button(actions, text="查看 OCR 原文", command=self.show_raw).pack(side=LEFT)
+        Button(actions, text="查看识别原文", command=self.show_raw).pack(side=LEFT)
 
     def _filter_currency(self, _event=None) -> None:
         query = self.currency_var.get().lower()
@@ -500,9 +516,9 @@ class OcrReviewDialog:
             self.db.add_price_record(
                 row.item_name,
                 row.amount,
-                currency,
+                row.currency or currency,
                 "ocr-selection",
-                confidence=0.85,
+                confidence=max(0.85, min(1.0, 0.55 + row.item_match_score * 0.2 + row.currency_match_score * 0.25)),
                 raw_text=self.raw_text,
                 screenshot_path=str(self.screenshot_path),
             )
@@ -523,7 +539,7 @@ class OcrReviewDialog:
 
     def show_raw(self) -> None:
         window = Toplevel(self.window)
-        window.title("OCR 原文")
+        window.title("识别原文")
         window.geometry("720x480")
         text = Text(window, wrap="word")
         text.pack(fill=BOTH, expand=True)
@@ -615,7 +631,7 @@ class RegionOcrWorkbench:
         Combobox(result, textvariable=self.currency_var, values=BASE_CURRENCIES).pack(fill=X, pady=(0, 10))
         Button(result, text="保存到价格库", command=self.save_record).pack(fill=X)
 
-        raw_box = LabelFrame(right, text="OCR 原文", padx=12, pady=12)
+        raw_box = LabelFrame(right, text="识别原文", padx=12, pady=12)
         raw_box.pack(fill=BOTH, expand=True, pady=(14, 0))
         self.raw_text = Text(raw_box, height=10, width=42, wrap="word")
         self.raw_text.pack(fill=BOTH, expand=True)
@@ -676,11 +692,7 @@ class RegionOcrWorkbench:
             messagebox.showwarning("缺少区域", "请先框选物品名区域和价格区域。", parent=self.window)
             return
 
-        ocr = TesseractOcr(
-            self.config.tesseract_cmd,
-            self.config.ocr_languages,
-            self.config.ocr_psm,
-        )
+        ocr = RapidOcr()
         item_crop = crop_image(
             self.image_path,
             self.rectangles["item"],
@@ -724,7 +736,7 @@ class RegionOcrWorkbench:
         if parsed.currency:
             self.currency_var.set(parsed.currency)
         if not item_result.ok or not price_result.ok:
-            self.status_var.set("OCR 未完整返回文本。请检查 Tesseract 是否安装，或缩小/重框区域。")
+            self.status_var.set("截图识别未完整返回文本。请缩小或重新框选区域。")
         else:
             self.status_var.set("识别完成，请确认后保存。")
 
@@ -758,15 +770,13 @@ class PriceTrackerApp:
         self.root = root
         self.config = load_config()
         self.db = PriceDatabase(self.config.database_path)
-        self.ocr = TesseractOcr(
-            self.config.tesseract_cmd,
-            self.config.ocr_languages,
-            self.config.ocr_psm,
-        )
+        self.bundled_currency_icon_count = seed_bundled_currency_icons(self.db)
+        self.ocr = RapidOcr()
         self.hotkeys = GlobalHotkeys()
         self.events: queue.Queue[str] = queue.Queue()
 
         self.search_var = StringVar()
+        self.focus_search_var = StringVar()
         self.item_var = StringVar()
         self.amount_var = StringVar()
         self.currency_var = StringVar(value="Divine Orb")
@@ -784,12 +794,42 @@ class PriceTrackerApp:
         self.source_filter_var = StringVar(value="全部来源")
         self.trend_widgets = []
         self.trend_data = {}
+        self.market_icon_images = {}
         self.search_debounce_job = None
         self.trend_render_job = None
         self._ignore_unmap_prompt = False
         self.context_item_name = ""
+        self._quick_price_foreground_hwnd = 0
+        self.quick_price_overlay = None
+        self.quick_price_overlay_labels = {}
+        self.quick_price_overlay_hide_job = None
+        self.quick_price_overlay_watch_token = 0
+        self.focus_search_overlay = None
+        self.focus_search_entry = None
+        self.focus_search_results = None
+        self.focus_search_outer_canvas = None
+        self.focus_search_container = None
+        self.focus_search_container_window = None
+        self.focus_search_results_canvas = None
+        self.focus_search_result_window = None
+        self.focus_search_results_scrollbar = None
+        self.focus_search_job = None
+        self.ocr_review_rows: list[ParsedItemPrice] = []
+        self.ocr_review_raw_text = ""
+        self.ocr_review_image_path = Path()
+        self.ocr_selected_index: int | None = None
+        self.ocr_item_var = StringVar()
+        self.ocr_amount_var = StringVar()
+        self.ocr_currency_var = StringVar(value="崇高石")
+        self.ocr_raw_var = StringVar()
+        self.ocr_favorite_var = StringVar(value="1")
+        self.ocr_running = False
+        self.ocr_animation_job = None
+        self.ocr_animation_step = 0
+        self.ocr_capture_photo = None
+        self.preload_ocr_var = StringVar(value="1" if self.config.preload_ocr_on_start else "0")
 
-        self.root.title("流放之路2 物价追踪")
+        self.root.title(f"流放之路2 物价追踪 v{__version__}")
         self.root.geometry("1120x760")
         self.root.minsize(980, 640)
         self._configure_style()
@@ -798,8 +838,11 @@ class PriceTrackerApp:
         self._register_hotkeys()
         self._refresh_recent()
         self._poll_events()
+        if self.config.preload_ocr_on_start:
+            self.root.after(600, self.prepare_ocr_runtime)
         self.root.protocol("WM_DELETE_WINDOW", self.on_close_request)
         self.root.bind("<Unmap>", self.on_window_unmap, add="+")
+        self.root.after(300, self._ensure_tray_icon)
 
     def _configure_style(self) -> None:
         style = ttk.Style()
@@ -824,14 +867,21 @@ class PriceTrackerApp:
         self.settings_width_var = StringVar(value=str(self.config.screenshot_width))
         self.settings_height_var = StringVar(value=str(self.config.screenshot_height))
         self.settings_manifest_var = StringVar(value=self.config.update_manifest)
-        self.ocr_install_dir_var = StringVar(value=self.config.ocr_install_dir)
-        self.ocr_command_var = StringVar(value=self.config.tesseract_cmd)
+        self.focus_search_shape_var = StringVar(value="圆角" if self.config.focus_search_rounded else "直角")
+        self.focus_search_limit_var = StringVar(value=str(self.config.focus_search_limit))
+        self.ocr_status_var = StringVar(value="截图识别已内置")
         self.manual_item_var = StringVar()
         self.manual_amount_var = StringVar()
         self.manual_currency_var = StringVar(value="崇高石")
         self.manual_favorite_var = StringVar(value="1" if self.config.manual_add_favorite else "0")
         self.minimize_action_var = StringVar(value=self._window_action_label(self.config.minimize_action, "minimize"))
         self.close_action_var = StringVar(value=self._window_action_label(self.config.close_action, "close"))
+
+        self.bottom_bar = Frame(self.root, padx=14, pady=8)
+        self.bottom_bar.pack(side="bottom", fill=X)
+        Label(self.bottom_bar, textvariable=self.progress_var, anchor="w").pack(side=LEFT, fill=X, expand=True)
+        self.progress = ttk.Progressbar(self.bottom_bar, mode="determinate", maximum=100, value=0, length=180)
+        self.progress.pack(side=RIGHT)
 
         shell = Frame(self.root, padx=0, pady=0)
         shell.pack(fill=BOTH, expand=True)
@@ -843,21 +893,49 @@ class PriceTrackerApp:
         self._nav_button("物价列表", self.show_market_page).pack(fill=X, pady=4)
         self._nav_button("收藏列表", self.show_favorites_page).pack(fill=X, pady=4)
         Frame(self.sidebar).pack(fill=BOTH, expand=True)
-        self._nav_button("手动记录", self.show_manual_record_page).pack(fill=X, pady=4)
-        self._nav_button("同步经济数据", self.sync_poe2db_currency).pack(fill=X, pady=4)
-        self._nav_button("配置", self.show_settings_page).pack(fill=X, pady=4)
+        self._nav_button("配置", self.show_settings_page).pack(side="bottom", fill=X, pady=4)
+        self._nav_button("同步经济数据", self.sync_poe2db_currency).pack(side="bottom", fill=X, pady=4)
+        self._nav_button("手动记录", self.show_manual_record_page).pack(side="bottom", fill=X, pady=4)
+        self._nav_button("截图识别", self.show_ocr_review_page).pack(side="bottom", fill=X, pady=4)
 
         self.content = Frame(shell, padx=22, pady=18)
         self.content.pack(side=LEFT, fill=BOTH, expand=True)
-        self.bottom_bar = Frame(self.root, padx=14, pady=8)
-        self.bottom_bar.pack(side="bottom", fill=X)
-        Label(self.bottom_bar, textvariable=self.progress_var, anchor="w").pack(side=LEFT, fill=X, expand=True)
-        self.progress = ttk.Progressbar(self.bottom_bar, mode="indeterminate", length=180)
-        self.progress.pack(side=RIGHT)
         self.show_market_page()
 
     def _nav_button(self, text: str, command):
         return Button(self.sidebar, text=text, command=command)
+
+    def _enable_combo_full_click(self, combo: ttk.Combobox) -> ttk.Combobox:
+        combo.configure(state="readonly")
+
+        def post_dropdown(_event=None):
+            combo.focus_set()
+            combo.after(1, lambda: self._post_combo_dropdown(combo))
+
+        combo.bind("<Button-1>", post_dropdown, add="+")
+        return combo
+
+    @staticmethod
+    def _post_combo_dropdown(combo: ttk.Combobox) -> None:
+        try:
+            combo.tk.call("ttk::combobox::Post", str(combo))
+        except Exception:
+            combo.event_generate("<Down>")
+
+    def _set_progress_idle(self, text: str = "就绪") -> None:
+        self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=100, value=0)
+        self.progress_var.set(text)
+
+    def _set_progress_busy(self, text: str) -> None:
+        self.progress.configure(mode="indeterminate", value=0)
+        self.progress.start(12)
+        self.progress_var.set(text)
+
+    def _set_progress_percent(self, percent: int, text: str) -> None:
+        self.progress.stop()
+        self.progress.configure(mode="determinate", maximum=100, value=max(0, min(100, percent)))
+        self.progress_var.set(text)
 
     def _clear_content(self) -> None:
         if hasattr(self, "trend_widgets"):
@@ -911,8 +989,8 @@ class PriceTrackerApp:
         Label(row, text="价格", width=10, anchor="w").pack(side=LEFT)
         Entry(row, textvariable=self.manual_amount_var, width=18).pack(side=LEFT)
         Label(row, text="单位").pack(side=LEFT, padx=(18, 8))
-        unit_values = ["崇高石", "神圣石"] + [name for name in BASE_CURRENCIES if name not in {"Exalted Orb", "Divine Orb"}]
-        Combobox(row, textvariable=self.manual_currency_var, values=unit_values, width=24).pack(side=LEFT)
+        manual_unit = Combobox(row, textvariable=self.manual_currency_var, values=["崇高石", "神圣石"], width=24)
+        self._enable_combo_full_click(manual_unit).pack(side=LEFT)
 
         ttk.Checkbutton(
             form,
@@ -937,6 +1015,298 @@ class PriceTrackerApp:
         self.manual_item_var.set("")
         self.manual_amount_var.set("")
         self.manual_currency_var.set("崇高石")
+
+    def show_ocr_review_page(self) -> None:
+        self._clear_content()
+        Label(
+            self.content,
+            text="截图识别",
+            font=("Microsoft YaHei UI", self.config.font_size + 8, "bold"),
+        ).pack(anchor="w")
+        toolbar = Frame(self.content)
+        toolbar.pack(fill=X, pady=(12, 10))
+        Button(toolbar, text="开始框选截图", command=self.start_area_capture).pack(side=LEFT)
+        Label(toolbar, text="框选后会先显示截图，再自动识别内容。").pack(side=LEFT, padx=(12, 0))
+        Button(toolbar, text="保存选中", command=self.save_selected_ocr_row).pack(side=RIGHT)
+        Button(toolbar, text="保存全部", command=self.save_all_ocr_rows).pack(side=RIGHT, padx=(0, 8))
+        ttk.Checkbutton(
+            toolbar,
+            text="保存后加入收藏",
+            variable=self.ocr_favorite_var,
+            onvalue="1",
+            offvalue="0",
+        ).pack(side=RIGHT, padx=(0, 16))
+
+        result_box = LabelFrame(self.content, text="识别结果", padx=12, pady=10)
+        result_box.pack(fill=X)
+
+        result_top = Frame(result_box)
+        result_top.pack(fill=X)
+        columns = ("item", "amount", "currency", "source", "confidence", "raw")
+        self.ocr_tree = ttk.Treeview(result_top, columns=columns, show="headings", selectmode="browse", height=5)
+        self.ocr_tree.heading("item", text="物品")
+        self.ocr_tree.heading("amount", text="价格")
+        self.ocr_tree.heading("currency", text="单位")
+        self.ocr_tree.heading("source", text="来源")
+        self.ocr_tree.heading("confidence", text="可信度")
+        self.ocr_tree.heading("raw", text="原始识别内容")
+        self.ocr_tree.column("item", width=260, stretch=True)
+        self.ocr_tree.column("amount", width=100, anchor="center")
+        self.ocr_tree.column("currency", width=120, anchor="center")
+        self.ocr_tree.column("source", width=100, anchor="center")
+        self.ocr_tree.column("confidence", width=90, anchor="center")
+        self.ocr_tree.column("raw", width=320, stretch=True)
+        y_scroll = ttk.Scrollbar(result_top, orient="vertical", command=self.ocr_tree.yview)
+        self.ocr_tree.configure(yscrollcommand=y_scroll.set)
+        self.ocr_tree.pack(side=LEFT, fill=BOTH, expand=True)
+        y_scroll.pack(side=RIGHT, fill=Y)
+        self.ocr_tree.bind("<<TreeviewSelect>>", self.on_ocr_row_select)
+
+        edit_row = Frame(result_box)
+        edit_row.pack(fill=X, pady=(10, 0))
+        Label(edit_row, text="物品").pack(side=LEFT)
+        Entry(edit_row, textvariable=self.ocr_item_var, width=30).pack(side=LEFT, fill=X, expand=True, padx=(8, 14))
+        Label(edit_row, text="价格").pack(side=LEFT)
+        Entry(edit_row, textvariable=self.ocr_amount_var, width=12).pack(side=LEFT, padx=(8, 14))
+        Label(edit_row, text="单位").pack(side=LEFT)
+        ocr_unit = Combobox(
+            edit_row,
+            textvariable=self.ocr_currency_var,
+            values=["崇高石", "神圣石"],
+            width=18,
+        )
+        self._enable_combo_full_click(ocr_unit).pack(side=LEFT, padx=(8, 14))
+        Button(edit_row, text="应用修改", command=self.apply_ocr_edit).pack(side=RIGHT)
+        Button(edit_row, text="删除此行", command=self.delete_selected_ocr_row).pack(side=RIGHT, padx=(0, 8))
+
+        process_box = LabelFrame(self.content, text="识别过程", padx=12, pady=10)
+        process_box.pack(fill=BOTH, expand=True, pady=(14, 0))
+        process_box.columnconfigure(0, weight=3)
+        process_box.columnconfigure(1, weight=2)
+        process_box.rowconfigure(0, weight=1)
+
+        preview = Frame(process_box)
+        preview.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        self.ocr_image_canvas = Canvas(preview, highlightthickness=1, highlightbackground="#d9e2ec", bg="#f8fafc")
+        x_scroll = ttk.Scrollbar(preview, orient="horizontal", command=self.ocr_image_canvas.xview)
+        y_scroll_image = ttk.Scrollbar(preview, orient="vertical", command=self.ocr_image_canvas.yview)
+        self.ocr_image_canvas.configure(xscrollcommand=x_scroll.set, yscrollcommand=y_scroll_image.set)
+        self.ocr_image_canvas.grid(row=0, column=0, sticky="nsew")
+        y_scroll_image.grid(row=0, column=1, sticky="ns")
+        x_scroll.grid(row=1, column=0, sticky="ew")
+        preview.columnconfigure(0, weight=1)
+        preview.rowconfigure(0, weight=1)
+
+        text_panel = Frame(process_box)
+        text_panel.grid(row=0, column=1, sticky="nsew")
+        Label(text_panel, text="识别到的文字").pack(anchor="w")
+        self.ocr_raw_text = Text(text_panel, height=12, wrap="word")
+        self.ocr_raw_text.pack(fill=BOTH, expand=True, pady=(6, 0))
+
+        self.refresh_ocr_review_table()
+        self._render_ocr_capture_image()
+        self._update_ocr_process_text()
+        self._set_ocr_running_ui(self.ocr_running)
+
+    def _render_ocr_capture_image(self) -> None:
+        canvas = getattr(self, "ocr_image_canvas", None)
+        if canvas is None:
+            return
+        canvas.delete("all")
+        if not self.ocr_review_image_path or not self.ocr_review_image_path.is_file():
+            canvas.create_text(24, 24, text="还没有截图。点击“开始框选截图”或按截图快捷键。", anchor="nw", fill="#607080")
+            canvas.configure(scrollregion=(0, 0, 680, 220))
+            return
+        try:
+            image = Image.open(self.ocr_review_image_path)
+            self.ocr_capture_photo = ImageTk.PhotoImage(image)
+            canvas.create_image(0, 0, image=self.ocr_capture_photo, anchor="nw")
+            canvas.configure(scrollregion=(0, 0, image.width, image.height))
+        except Exception as exc:
+            canvas.create_text(24, 24, text=f"截图预览失败：{exc}", anchor="nw", fill="#b42318")
+            canvas.configure(scrollregion=(0, 0, 680, 220))
+
+    def _update_ocr_process_text(self, placeholder: str = "") -> None:
+        text = getattr(self, "ocr_raw_text", None)
+        if text is None:
+            return
+        try:
+            text.delete("1.0", END)
+            if self.ocr_review_raw_text:
+                text.insert("1.0", self.ocr_review_raw_text)
+            elif placeholder:
+                text.insert("1.0", placeholder)
+            elif self.ocr_running:
+                text.insert("1.0", "正在识别截图内容")
+            else:
+                text.insert("1.0", "等待截图。")
+        except Exception:
+            return
+
+    def _set_ocr_running_ui(self, running: bool) -> None:
+        self.ocr_running = running
+        if running:
+            self._animate_ocr_text()
+        elif self.ocr_animation_job is not None:
+            try:
+                self.root.after_cancel(self.ocr_animation_job)
+            except Exception:
+                pass
+            self.ocr_animation_job = None
+
+    def _animate_ocr_text(self) -> None:
+        if not self.ocr_running:
+            self.ocr_animation_job = None
+            return
+        dots = "." * (self.ocr_animation_step % 4)
+        self.ocr_animation_step += 1
+        self._update_ocr_process_text(f"正在识别截图内容{dots}\n\n识别完成后，结果会自动出现在上方列表。")
+        self.ocr_animation_job = self.root.after(360, self._animate_ocr_text)
+
+    def _ocr_row_confidence(self, row: ParsedItemPrice) -> float:
+        match = re.search(r"structure_confidence=([0-9.]+)", row.raw_text)
+        if match:
+            try:
+                return max(0.0, min(1.0, float(match.group(1))))
+            except ValueError:
+                pass
+        if row.item_match_score or row.currency_match_score:
+            return max(
+                0.0,
+                min(1.0, 0.45 + row.item_match_score * 0.3 + row.currency_match_score * 0.25),
+            )
+        return 0.55
+
+    def refresh_ocr_review_table(self) -> None:
+        tree = getattr(self, "ocr_tree", None)
+        if tree is None:
+            return
+        for item in tree.get_children():
+            tree.delete(item)
+        for index, row in enumerate(self.ocr_review_rows):
+            confidence = self._ocr_row_confidence(row)
+            tree.insert(
+                "",
+                END,
+                iid=str(index),
+                values=(
+                    row.item_name,
+                    f"{row.amount:g}",
+                    row.currency,
+                    "截图识别",
+                    f"{confidence:.0%}",
+                    row.raw_text,
+                ),
+            )
+        if self.ocr_review_rows:
+            tree.selection_set("0")
+            self.load_ocr_row(0)
+
+    def on_ocr_row_select(self, _event=None) -> None:
+        selection = getattr(self, "ocr_tree", None).selection() if hasattr(self, "ocr_tree") else ()
+        if not selection:
+            return
+        self.load_ocr_row(int(selection[0]))
+
+    def load_ocr_row(self, index: int) -> None:
+        if index < 0 or index >= len(self.ocr_review_rows):
+            return
+        row = self.ocr_review_rows[index]
+        self.ocr_selected_index = index
+        self.ocr_item_var.set(row.item_name)
+        self.ocr_amount_var.set(f"{row.amount:g}")
+        self.ocr_currency_var.set(row.currency or "崇高石")
+        if hasattr(self, "ocr_raw_text"):
+            self.ocr_raw_text.delete("1.0", END)
+            self.ocr_raw_text.insert("1.0", row.raw_text)
+
+    def apply_ocr_edit(self) -> bool:
+        index = self.ocr_selected_index
+        if index is None or index < 0 or index >= len(self.ocr_review_rows):
+            return False
+        item = self.ocr_item_var.get().strip()
+        currency = self.ocr_currency_var.get().strip() or "崇高石"
+        try:
+            amount = float(self.ocr_amount_var.get().strip().replace(",", "."))
+        except ValueError:
+            messagebox.showwarning("价格格式错误", "价格需要填写数字。")
+            return False
+        if not item:
+            messagebox.showwarning("缺少物品", "物品名称不能为空。")
+            return False
+        raw = self.ocr_raw_text.get("1.0", END).strip() if hasattr(self, "ocr_raw_text") else self.ocr_review_rows[index].raw_text
+        old = self.ocr_review_rows[index]
+        self.ocr_review_rows[index] = ParsedItemPrice(
+            item_name=item,
+            amount=amount,
+            currency=currency,
+            raw_text=raw,
+            trend_percent=old.trend_percent,
+            item_page_url=old.item_page_url,
+            item_icon_url=old.item_icon_url,
+            currency_page_url=old.currency_page_url,
+            currency_icon_url=old.currency_icon_url,
+            item_icon_path=old.item_icon_path,
+            currency_icon_path=old.currency_icon_path,
+            item_icon_phash=old.item_icon_phash,
+            currency_icon_phash=old.currency_icon_phash,
+            item_match_score=old.item_match_score,
+            currency_match_score=old.currency_match_score,
+        )
+        self.refresh_ocr_review_table()
+        try:
+            self.ocr_tree.selection_set(str(index))
+        except Exception:
+            pass
+        return True
+
+    def delete_selected_ocr_row(self) -> None:
+        index = self.ocr_selected_index
+        if index is None or index < 0 or index >= len(self.ocr_review_rows):
+            return
+        del self.ocr_review_rows[index]
+        self.ocr_selected_index = None
+        self.refresh_ocr_review_table()
+
+    def _save_ocr_indices(self, indices: list[int]) -> None:
+        if self.ocr_selected_index in indices:
+            self.apply_ocr_edit()
+        saved = 0
+        favorite = self.ocr_favorite_var.get() == "1"
+        for index in indices:
+            if index < 0 or index >= len(self.ocr_review_rows):
+                continue
+            row = self.ocr_review_rows[index]
+            self.db.upsert_latest_price_record(
+                row.item_name,
+                row.amount,
+                row.currency,
+                "截图识别",
+                confidence=self._ocr_row_confidence(row),
+                raw_text=row.raw_text or self.ocr_review_raw_text,
+                screenshot_path=str(self.ocr_review_image_path),
+            )
+            if favorite:
+                self.db.set_favorite(row.item_name, True)
+            saved += 1
+        if saved:
+            self.search_var.set(self.ocr_review_rows[indices[0]].item_name)
+            self.refresh_market_table()
+            self.status_var.set(f"已保存 {saved} 条截图识别结果。")
+            messagebox.showinfo("保存完成", f"已保存 {saved} 条价格记录。")
+
+    def save_selected_ocr_row(self) -> None:
+        selection = getattr(self, "ocr_tree", None).selection() if hasattr(self, "ocr_tree") else ()
+        if not selection:
+            messagebox.showwarning("未选择", "请先选择要保存的识别结果。")
+            return
+        self._save_ocr_indices([int(selection[0])])
+
+    def save_all_ocr_rows(self) -> None:
+        if not self.ocr_review_rows:
+            messagebox.showwarning("没有结果", "当前没有可保存的截图识别结果。")
+            return
+        self._save_ocr_indices(list(range(len(self.ocr_review_rows))))
 
     def _build_market_page(self, title: str, favorites_only: bool) -> None:
         self._clear_content()
@@ -999,7 +1369,7 @@ class PriceTrackerApp:
         self.market_tree = ttk.Treeview(
             table_box,
             columns=columns,
-            show="headings",
+            show="tree headings",
             selectmode="browse",
             style="Market.Treeview",
         )
@@ -1031,8 +1401,11 @@ class PriceTrackerApp:
             "updated": 180,
             "favorite": 80,
         }
+        self.market_headings = headings
+        self.market_tree.heading("#0", text=self._market_heading_text("图标", "icon"), command=lambda: self.sort_by_column("icon"))
+        self.market_tree.column("#0", width=58, minwidth=42, anchor="center", stretch=False)
         for key in columns:
-            self.market_tree.heading(key, text=headings[key], command=lambda k=key: self.sort_by_column(k))
+            self.market_tree.heading(key, text=self._market_heading_text(headings[key], key), command=lambda k=key: self.sort_by_column(k))
             anchor = "center" if key in {"index", "favorite", "count"} else "w"
             self.market_tree.column(key, width=widths[key], anchor=anchor)
         self.market_tree.tag_configure("pinned", background="#fff7d6")
@@ -1065,8 +1438,29 @@ class PriceTrackerApp:
 
     def show_settings_page(self) -> None:
         self._clear_content()
-        Label(self.content, text="配置", font=("Microsoft YaHei UI", self.config.font_size + 8, "bold")).pack(anchor="w")
-        grid = Frame(self.content)
+        holder = Frame(self.content)
+        holder.pack(fill=BOTH, expand=True)
+        canvas = Canvas(holder, highlightthickness=0)
+        scrollbar = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
+        body = Frame(canvas)
+        window_id = canvas.create_window((0, 0), window=body, anchor="nw")
+
+        def update_scrollregion(_event=None) -> None:
+            canvas.update_idletasks()
+            canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 0, 0))
+
+        def resize_body(event) -> None:
+            canvas.itemconfigure(window_id, width=event.width)
+            canvas.after_idle(update_scrollregion)
+
+        body.bind("<Configure>", update_scrollregion)
+        canvas.bind("<Configure>", resize_body)
+        canvas.configure(yscrollcommand=scrollbar.set)
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        scrollbar.pack(side=RIGHT, fill=Y)
+
+        Label(body, text="配置", font=("Microsoft YaHei UI", self.config.font_size + 8, "bold")).pack(anchor="w")
+        grid = Frame(body)
         grid.pack(fill=X, pady=(18, 0))
 
         left = LabelFrame(grid, text="快捷键", padx=14, pady=12)
@@ -1075,12 +1469,15 @@ class PriceTrackerApp:
             ("截图识别", StringVar(value=self.config.hotkeys.lookup_hovered)),
             ("截图入库", StringVar(value=self.config.hotkeys.capture_price)),
             ("聚焦搜索", StringVar(value=self.config.hotkeys.focus_search)),
+            ("快速查价", StringVar(value=self.config.hotkeys.quick_price)),
         ]:
             row = Frame(left)
             row.pack(fill=X, pady=6)
             Label(row, text=label, width=12, anchor="w").pack(side=LEFT)
             button = HotkeyCaptureButton(row, variable)
             button.pack(side=LEFT, fill=X, expand=True)
+            if variable.get() == self.config.hotkeys.focus_search:
+                Button(row, text="Ctrl+Space", command=lambda v=variable: v.set("Ctrl+Space")).pack(side=LEFT, padx=(8, 0))
             variable.trace_add("write", lambda *_args, v=variable, n=label: self._save_hotkey_setting(n, v.get()))
 
         right = LabelFrame(grid, text="显示与截图", padx=14, pady=12)
@@ -1103,8 +1500,20 @@ class PriceTrackerApp:
         unit = Combobox(row, textvariable=self.display_currency_var, values=["神圣石", "崇高石"], state="readonly")
         unit.pack(side=LEFT, fill=X, expand=True)
         unit.bind("<<ComboboxSelected>>", lambda _event: self.save_display_currency())
+        row = Frame(right)
+        row.pack(fill=X, pady=6)
+        Label(row, text="焦点搜索外观", width=14, anchor="w").pack(side=LEFT)
+        shape = Combobox(row, textvariable=self.focus_search_shape_var, values=["圆角", "直角"], state="readonly")
+        shape.pack(side=LEFT, fill=X, expand=True)
+        shape.bind("<<ComboboxSelected>>", lambda _event: self.save_focus_search_settings())
+        row = Frame(right)
+        row.pack(fill=X, pady=6)
+        Label(row, text="焦点搜索条数", width=14, anchor="w").pack(side=LEFT)
+        limit = Combobox(row, textvariable=self.focus_search_limit_var, values=["3", "5", "8", "10"], state="readonly")
+        limit.pack(side=LEFT, fill=X, expand=True)
+        limit.bind("<<ComboboxSelected>>", lambda _event: self.save_focus_search_settings())
 
-        window_box = LabelFrame(self.content, text="窗口行为", padx=14, pady=12)
+        window_box = LabelFrame(body, text="窗口行为", padx=14, pady=12)
         window_box.pack(fill=X, pady=(16, 0))
         row = Frame(window_box)
         row.pack(fill=X, pady=6)
@@ -1128,33 +1537,37 @@ class PriceTrackerApp:
         )
         close.pack(side=LEFT, fill=X, expand=True)
         close.bind("<<ComboboxSelected>>", lambda _event: self.save_window_behavior_settings())
+        Label(
+            window_box,
+            text="保留在任务栏：普通最小化。右下角小图标：隐藏窗口并继续后台运行。退出软件：关闭程序并停止快捷键。",
+            foreground="#607080",
+            wraplength=860,
+            justify=LEFT,
+        ).pack(anchor="w", pady=(8, 0))
 
-        update_box = LabelFrame(self.content, text="更新", padx=14, pady=12)
-        update_box.pack(fill=X, pady=(16, 0))
-        Entry(update_box, textvariable=self.settings_manifest_var).pack(fill=X)
-        self.settings_manifest_var.trace_add("write", lambda *_args: self.save_inline_settings())
-
-        ocr_box = LabelFrame(self.content, text="OCR", padx=14, pady=12)
+        ocr_box = LabelFrame(body, text="截图识别功能", padx=14, pady=12)
         ocr_box.pack(fill=X, pady=(16, 0))
         Label(
             ocr_box,
-            text="截图识别使用本地 Tesseract。可选择已安装目录；不选择时会自动下载到软件数据目录。",
+            text="截图识别能力已随程序提供。首次使用时需要准备一下，之后会更快。",
             foreground="#607080",
             wraplength=760,
         ).pack(anchor="w")
-        ocr_dir_row = Frame(ocr_box)
-        ocr_dir_row.pack(fill=X, pady=(10, 0))
-        Label(ocr_dir_row, text="OCR 目录", width=10, anchor="w").pack(side=LEFT)
-        Entry(ocr_dir_row, textvariable=self.ocr_install_dir_var).pack(side=LEFT, fill=X, expand=True)
-        Button(ocr_dir_row, text="选择目录", command=self.choose_ocr_install_dir).pack(side=LEFT, padx=(8, 0))
-        Button(ocr_dir_row, text="自动准备", command=self.prepare_ocr_runtime).pack(side=LEFT, padx=(8, 0))
-        self.ocr_install_dir_var.trace_add("write", lambda *_args: self.save_ocr_settings())
-        ocr_cmd_row = Frame(ocr_box)
-        ocr_cmd_row.pack(fill=X, pady=(8, 0))
-        Label(ocr_cmd_row, text="当前程序", width=10, anchor="w").pack(side=LEFT)
-        Entry(ocr_cmd_row, textvariable=self.ocr_command_var, state="readonly").pack(side=LEFT, fill=X, expand=True)
+        ocr_row = Frame(ocr_box)
+        ocr_row.pack(fill=X, pady=(10, 0))
+        Label(ocr_row, text="准备状态", width=10, anchor="w").pack(side=LEFT)
+        Entry(ocr_row, textvariable=self.ocr_status_var, state="readonly").pack(side=LEFT, fill=X, expand=True)
+        Button(ocr_row, text="提前准备", command=self.prepare_ocr_runtime).pack(side=LEFT, padx=(8, 0))
+        ttk.Checkbutton(
+            ocr_box,
+            text="启动后自动提前准备截图识别",
+            variable=self.preload_ocr_var,
+            onvalue="1",
+            offvalue="0",
+            command=self.save_preload_ocr_setting,
+        ).pack(anchor="w", pady=(10, 0))
 
-        danger_box = LabelFrame(self.content, text="数据", padx=14, pady=12)
+        danger_box = LabelFrame(body, text="数据", padx=14, pady=12)
         danger_box.pack(fill=X, pady=(16, 0))
         Label(
             danger_box,
@@ -1165,11 +1578,31 @@ class PriceTrackerApp:
         Button(danger_box, text="清空已记录数据", command=self.clear_recorded_data).pack(side=RIGHT, padx=(12, 0))
 
         Label(
-            self.content,
+            body,
             text="鼠标附近截图尺寸用于旧的悬停截图入库：按快捷键时截取鼠标周围固定范围。现在主流程的框选截图不受这个尺寸影响。",
             foreground="#777",
             wraplength=760,
         ).pack(anchor="w", pady=(16, 0))
+        Button(body, text="退出软件", command=self.exit_app).pack(anchor="w", pady=(16, 0))
+        Label(
+            body,
+            text="© 2026 大狗狗丶丶。版权所有，保留所有权利。",
+            foreground="#8a97a6",
+            wraplength=760,
+        ).pack(anchor="w", pady=(16, 18))
+
+        def wheel_handler(event) -> None:
+            canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
+
+        self._bind_mousewheel_recursive(holder, wheel_handler)
+
+    def _bind_mousewheel_recursive(self, widget, handler) -> None:
+        try:
+            widget.bind("<MouseWheel>", handler, add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_mousewheel_recursive(child, handler)
 
     def _save_hotkey_setting(self, label: str, value: str) -> None:
         try:
@@ -1182,6 +1615,8 @@ class PriceTrackerApp:
             self.config.hotkeys.capture_price = value
         elif label == "聚焦搜索":
             self.config.hotkeys.focus_search = value
+        elif label == "快速查价":
+            self.config.hotkeys.quick_price = value
         save_config(self.config)
         self.reload_hotkeys()
 
@@ -1190,6 +1625,7 @@ class PriceTrackerApp:
             self.config.screenshot_width = max(120, int(self.settings_width_var.get()))
             self.config.screenshot_height = max(120, int(self.settings_height_var.get()))
             self.config.page_size = max(10, min(500, int(self.page_size_var.get())))
+            self.config.focus_search_limit = max(1, min(10, int(self.focus_search_limit_var.get())))
         except ValueError:
             return
         self.config.update_manifest = self.settings_manifest_var.get().strip()
@@ -1197,26 +1633,24 @@ class PriceTrackerApp:
         self._configure_style()
         self.status_var.set("配置已自动保存。")
 
-    def choose_ocr_install_dir(self) -> None:
-        initial = self.ocr_install_dir_var.get().strip() or str(self.config.data_path)
-        selected = filedialog.askdirectory(title="选择 OCR 目录", initialdir=initial)
-        if selected:
-            self.ocr_install_dir_var.set(selected)
+    def save_focus_search_settings(self) -> None:
+        try:
+            self.config.focus_search_limit = max(1, min(10, int(self.focus_search_limit_var.get())))
+        except ValueError:
+            self.config.focus_search_limit = 5
+            self.focus_search_limit_var.set("5")
+        self.config.focus_search_rounded = self.focus_search_shape_var.get() != "直角"
+        save_config(self.config)
+        self.status_var.set("焦点搜索偏好已保存。")
 
     def save_ocr_settings(self) -> None:
-        directory = self.ocr_install_dir_var.get().strip()
-        self.config.ocr_install_dir = directory
-        found = find_tesseract(Path(directory)) if directory else None
-        if found:
-            self.config.tesseract_cmd = str(found)
-            self.ocr_command_var.set(str(found))
-            self.ocr = TesseractOcr(
-                self.config.tesseract_cmd,
-                self.config.ocr_languages,
-                self.config.ocr_psm,
-            )
-            self.status_var.set("OCR 目录已保存并生效。")
+        self.config.ocr_engine = "rapidocr"
         save_config(self.config)
+
+    def save_preload_ocr_setting(self) -> None:
+        self.config.preload_ocr_on_start = self.preload_ocr_var.get() == "1"
+        save_config(self.config)
+        self.status_var.set("截图识别准备偏好已保存。")
 
     def save_window_behavior_settings(self) -> None:
         self.config.minimize_action = self._window_action_value(self.minimize_action_var.get(), "minimize")
@@ -1227,26 +1661,17 @@ class PriceTrackerApp:
     def prepare_ocr_runtime(self) -> None:
         if getattr(self, "ocr_preparing", False):
             return
-        self.save_ocr_settings()
         self.ocr_preparing = True
-        self.progress.configure(mode="determinate", maximum=100, value=0)
-        self.progress_var.set("正在准备 OCR...")
+        self._set_progress_percent(0, "正在准备截图识别功能...")
         thread = threading.Thread(target=self._prepare_ocr_runtime_worker, daemon=True)
         thread.start()
 
     def _prepare_ocr_runtime_worker(self) -> None:
-        def progress(percent: int, url: str) -> None:
-            self.events.put(("ocr_progress", percent, url))
-
         try:
-            install_dir = Path(self.config.ocr_install_dir) if self.config.ocr_install_dir.strip() else None
-            result = prepare_tesseract_ocr(
-                self.config.data_path,
-                self.config.ocr_download_url,
-                progress=progress,
-                install_dir=install_dir,
-            )
-            self.events.put(("ocr_done", result.ok, str(result.tesseract_path), result.message))
+            ocr = RapidOcr()
+            ok = ocr.available()
+            message = "截图识别已准备好。" if ok else "截图识别功能暂时不可用，请重新安装新版程序。"
+            self.events.put(("ocr_done", ok, "截图识别已准备好", message))
         except Exception as exc:
             self.events.put(("ocr_done", False, "", str(exc)))
 
@@ -1294,8 +1719,34 @@ class PriceTrackerApp:
         self.status_var.set(f"列表字体已调整为 {self.config.font_size}。")
         self.show_favorites_page() if getattr(self, "current_favorites_only", False) else self.show_market_page()
 
+    def _market_heading_text(self, label: str, key: str) -> str:
+        db_column = {
+            "icon": "icon",
+            "index": "index",
+            "item": "name",
+            "price": "price",
+            "currency": "currency",
+            "trend": "trend",
+            "updated": "latest_at",
+            "count": "count",
+            "source": "source",
+            "favorite": "favorite",
+        }.get(key, key)
+        if self.sort_column != db_column:
+            return label
+        return f"{label} {'↓' if self.sort_descending else '↑'}"
+
+    def _update_market_headings(self) -> None:
+        if not self._has_market_tree():
+            return
+        headings = getattr(self, "market_headings", {})
+        self.market_tree.heading("#0", text=self._market_heading_text("图标", "icon"), command=lambda: self.sort_by_column("icon"))
+        for key, label in headings.items():
+            self.market_tree.heading(key, text=self._market_heading_text(label, key), command=lambda k=key: self.sort_by_column(k))
+
     def sort_by_column(self, column: str) -> None:
         mapping = {
+            "icon": "图标",
             "index": "序号",
             "item": "名称",
             "price": "价格从高到低",
@@ -1307,6 +1758,7 @@ class PriceTrackerApp:
             "favorite": "收藏",
         }
         db_column = {
+            "icon": "icon",
             "index": "index",
             "item": "name",
             "price": "price",
@@ -1379,6 +1831,7 @@ class PriceTrackerApp:
             widget.destroy()
         self.trend_widgets.clear()
         self.trend_data.clear()
+        self.market_icon_images.clear()
         for item in self.market_tree.get_children():
             self.market_tree.delete(item)
         self._refresh_source_filter_values()
@@ -1412,10 +1865,13 @@ class PriceTrackerApp:
         rows = all_rows[(page - 1) * page_size : page * page_size]
         for index, row in enumerate(rows, start=(page - 1) * page_size + 1):
             display_amount = convert_amount(row.latest_amount, row.latest_currency, target_currency, rate)
+            icon_image = self._market_icon_image(row.item_icon_path, row.item_name)
             self.market_tree.insert(
                 "",
                 END,
                 iid=row.item_name,
+                text="",
+                image=icon_image,
                 values=(
                     index,
                     row.item_name,
@@ -1432,10 +1888,26 @@ class PriceTrackerApp:
             history = [record.amount for record in self.db.get_price_history(row.item_name, limit=8)]
             self.trend_data[row.item_name] = (history, row.trend_percent)
         self._apply_visible_columns()
+        self._update_market_headings()
         self.root.update_idletasks()
         self._auto_fit_market_columns()
         self._schedule_trend_render(260)
         self.status_var.set(f"共 {total} 条记录，第 {page}/{max_page} 页")
+
+    def _market_icon_image(self, path: str, key: str):
+        if not path:
+            return ""
+        try:
+            source = Path(path)
+            if not source.exists():
+                return ""
+            image = Image.open(source).convert("RGBA")
+            image.thumbnail((34, 34), Image.LANCZOS)
+            photo = ImageTk.PhotoImage(image)
+            self.market_icon_images[key] = photo
+            return photo
+        except Exception:
+            return ""
 
     def _settle_market_layout(self) -> None:
         if not self._has_market_tree():
@@ -1448,7 +1920,9 @@ class PriceTrackerApp:
     def _market_sort_key(self, row, target_currency: str, rate: float):
         column = self.sort_column
         if column == "index":
-            return row.item_name.casefold()
+            return row.item_id
+        if column == "icon":
+            return int(self._market_row_has_icon(row))
         if column == "name":
             return row.item_name.casefold()
         if column == "price":
@@ -1466,6 +1940,15 @@ class PriceTrackerApp:
         if column == "favorite":
             return int(bool(row.favorite))
         return str(getattr(row, column, "")).casefold()
+
+    @staticmethod
+    def _market_row_has_icon(row) -> bool:
+        if not row.item_icon_path:
+            return False
+        try:
+            return Path(row.item_icon_path).is_file()
+        except OSError:
+            return False
 
     @staticmethod
     def _trend_number(value: str) -> float:
@@ -1564,7 +2047,8 @@ class PriceTrackerApp:
         visible = list(self.market_tree["columns"]) if display_columns == "#all" or display_columns == ("#all",) else list(display_columns)
         if not visible:
             return
-        tree_width = max(760, self.market_tree.winfo_width() - 26)
+        icon_width = 58 if "图标" in self.config.visible_columns else 0
+        tree_width = max(760, self.market_tree.winfo_width() - 26 - icon_width)
         weights = {
             "index": 0.55,
             "item": 2.9,
@@ -1651,6 +2135,8 @@ class PriceTrackerApp:
         row_id = self.market_tree.identify_row(event.y)
         if not row_id:
             return
+        if column == "#0":
+            return
         display_columns = self.market_tree["displaycolumns"]
         if display_columns == "#all" or display_columns == ("#all",):
             columns = list(self.market_tree["columns"])
@@ -1699,6 +2185,7 @@ class PriceTrackerApp:
         if not self._has_market_tree():
             return
         key_to_label = {
+            "icon": "图标",
             "index": "序号",
             "item": "物品",
             "price": "价格",
@@ -1711,9 +2198,16 @@ class PriceTrackerApp:
         }
         visible = []
         for key, label in key_to_label.items():
+            if key == "icon":
+                continue
             if label in self.config.visible_columns:
                 visible.append(key)
-        self.market_tree.configure(displaycolumns=visible or list(key_to_label))
+        data_columns = [key for key in key_to_label if key != "icon"]
+        self.market_tree.configure(displaycolumns=visible or data_columns)
+        if "图标" in self.config.visible_columns:
+            self.market_tree.column("#0", width=58, minwidth=42, stretch=False)
+        else:
+            self.market_tree.column("#0", width=0, minwidth=0, stretch=False)
         self.root.update_idletasks()
         self._auto_fit_market_columns()
 
@@ -1722,7 +2216,7 @@ class PriceTrackerApp:
         window.title("显示列")
         window.geometry("360x420")
         variables: dict[str, StringVar] = {}
-        labels = ["序号", "物品", "价格", "单位", "走势", "记录", "来源", "更新时间", "收藏"]
+        labels = ["序号", "图标", "物品", "价格", "单位", "走势", "记录", "来源", "更新时间", "收藏"]
         body = Frame(window, padx=16, pady=16)
         body.pack(fill=BOTH, expand=True)
         for label in labels:
@@ -1755,6 +2249,10 @@ class PriceTrackerApp:
             self.config.hotkeys.focus_search,
             lambda: self.events.put("focus_search"),
         )
+        self.hotkeys.register(
+            self.config.hotkeys.quick_price,
+            lambda: self.events.put("quick_price"),
+        )
         self.hotkeys.start()
         if self.hotkeys.errors:
             self.status_var.set("；".join(self.hotkeys.errors))
@@ -1770,7 +2268,8 @@ class PriceTrackerApp:
                 "快捷键已加载："
                 f"查询 {self.config.hotkeys.lookup_hovered}，"
                 f"入库 {self.config.hotkeys.capture_price}，"
-                f"搜索 {self.config.hotkeys.focus_search}"
+                f"搜索 {self.config.hotkeys.focus_search}，"
+                f"快速查价 {self.config.hotkeys.quick_price}"
             )
 
     def _poll_events(self) -> None:
@@ -1782,73 +2281,353 @@ class PriceTrackerApp:
                 elif isinstance(event, tuple) and event[0] == "sync_progress":
                     _kind, index, total, category, url = event
                     percent = int(index / total * 100)
-                    self.progress.configure(mode="determinate", maximum=100, value=percent)
-                    self.progress_var.set(f"同步中 {percent}%：{category}  {url}")
+                    self._set_progress_percent(percent, f"同步中 {percent}%：{category}  {url}")
                 elif isinstance(event, tuple) and event[0] == "sync_error":
                     self.syncing = False
-                    self.progress.stop()
-                    self.progress.configure(mode="indeterminate")
-                    self.progress_var.set("同步失败")
+                    self._set_progress_idle("同步失败")
                     messagebox.showerror("同步失败", event[1])
                 elif isinstance(event, tuple) and event[0] == "ocr_progress":
                     _kind, percent, url = event
-                    self.progress.configure(mode="determinate", maximum=100, value=percent)
-                    self.progress_var.set(f"OCR 准备中 {percent}%：{url}")
+                    self._set_progress_percent(percent, f"截图识别准备中 {percent}%：{url}")
                 elif isinstance(event, tuple) and event[0] == "ocr_done":
-                    _kind, ok, tesseract_path, message = event
+                    _kind, ok, engine_name, message = event
                     self.ocr_preparing = False
-                    self.progress.configure(mode="indeterminate", value=0)
                     if ok:
-                        self.config.tesseract_cmd = tesseract_path
-                        self.config.ocr_install_dir = str(Path(tesseract_path).parent)
-                        self.config.ocr_languages = "chi_sim+eng"
-                        self.ocr_install_dir_var.set(self.config.ocr_install_dir)
-                        self.ocr_command_var.set(tesseract_path)
+                        self.config.ocr_engine = "rapidocr"
+                        self.ocr_status_var.set(engine_name or "截图识别已准备好")
                         save_config(self.config)
-                        self.ocr = TesseractOcr(
-                            self.config.tesseract_cmd,
-                            self.config.ocr_languages,
-                            self.config.ocr_psm,
-                        )
-                        self.progress_var.set("OCR 已准备好")
-                        self.status_var.set("OCR 已自动下载并配置完成。")
-                        messagebox.showinfo("OCR", "OCR 已准备好。")
+                        self.ocr = RapidOcr()
+                        self._set_progress_idle("截图识别已准备好")
+                        self.status_var.set("截图识别已准备好。")
+                        messagebox.showinfo("截图识别", "截图识别已准备好。")
                     else:
-                        self.progress_var.set("OCR 准备失败")
-                        messagebox.showerror("OCR 准备失败", message)
+                        self._set_progress_idle("截图识别准备失败")
+                        messagebox.showerror("截图识别准备失败", message)
+                elif isinstance(event, tuple) and event[0] == "ocr_recognized":
+                    _kind, ok, rows, raw_text, crop_path, message = event
+                    self._set_ocr_running_ui(False)
+                    self.ocr_review_raw_text = raw_text
+                    self.ocr_review_image_path = Path(crop_path)
+                    if ok:
+                        self.ocr_review_rows = rows
+                        self.show_ocr_review_page()
+                        self._set_progress_idle(f"截图识别完成：{len(rows)} 条。")
+                        self.status_var.set(f"截图识别完成：{len(rows)} 条，请确认后保存。")
+                    else:
+                        self.ocr_review_rows = []
+                        self.show_ocr_review_page()
+                        self._set_progress_idle("截图识别未得到结果")
+                        messagebox.showwarning("未识别到价格列表", message)
                 elif isinstance(event, tuple) and event[0] == "update_progress":
                     _kind, percent, url = event
-                    self.progress.configure(mode="determinate", maximum=100, value=percent)
-                    self.progress_var.set(f"更新下载中 {percent}%：{url}")
+                    self._set_progress_percent(percent, f"更新下载中 {percent}%：{url}")
                 elif isinstance(event, tuple) and event[0] == "update_done":
                     _kind, ok, executable_path, message = event
                     self.updating = False
-                    self.progress.configure(mode="indeterminate", value=0)
                     if ok and executable_path:
-                        self.progress_var.set("更新已下载")
+                        self._set_progress_idle("更新已下载")
                         if messagebox.askyesno("更新完成", f"{message}\n\n现在启动新版并退出当前版本？"):
                             subprocess.Popen([executable_path], close_fds=True)
                             self.exit_app()
                     elif ok:
-                        self.progress_var.set("更新已下载")
+                        self._set_progress_idle("更新已下载")
                         messagebox.showinfo("更新完成", message)
                     else:
-                        self.progress_var.set("更新失败")
+                        self._set_progress_idle("更新失败")
                         messagebox.showerror("更新失败", message)
                 elif event == "open_workbench":
                     self.start_area_capture()
                 elif event == "capture_price":
                     self.capture_price_from_screenshot()
+                elif event == "quick_price":
+                    self.quick_price_from_clipboard()
                 elif event == "focus_search":
-                    self.root.deiconify()
-                    self.root.lift()
-                    self.search_entry.focus_set()
+                    self.toggle_focus_search_overlay()
         except queue.Empty:
             pass
         self.root.after(120, self._poll_events)
 
     def search(self) -> None:
         self.refresh_market_table()
+
+    def toggle_focus_search_overlay(self) -> None:
+        if self._focus_search_overlay_exists():
+            self.destroy_focus_search_overlay()
+        else:
+            self.show_focus_search_overlay()
+
+    def show_focus_search_overlay(self) -> None:
+        if self._focus_search_overlay_exists():
+            self.focus_search_overlay.lift()
+            if self.focus_search_entry is not None:
+                self.focus_search_entry.focus_force()
+                self.focus_search_entry.selection_range(0, END)
+            return
+
+        overlay = Toplevel(self.root)
+        self.focus_search_overlay = overlay
+        overlay.overrideredirect(True)
+        overlay.attributes("-topmost", True)
+        try:
+            overlay.attributes("-alpha", 0.96)
+        except Exception:
+            pass
+        transparent = "#ff00ff"
+        if self.config.focus_search_rounded:
+            overlay.configure(bg=transparent)
+            try:
+                overlay.attributes("-transparentcolor", transparent)
+            except Exception:
+                pass
+        else:
+            overlay.configure(bg="#ffffff")
+        overlay.bind("<Escape>", lambda _event: self.destroy_focus_search_overlay())
+        overlay.bind("<Control-space>", lambda _event: self.destroy_focus_search_overlay())
+        overlay.bind("<Control-Key-space>", lambda _event: self.destroy_focus_search_overlay())
+
+        outer = Canvas(overlay, bg=transparent if self.config.focus_search_rounded else "#ffffff", highlightthickness=0)
+        outer.pack(fill=BOTH, expand=True)
+        self.focus_search_outer_canvas = outer
+        container = Frame(outer, bg="#ffffff", padx=16, pady=12, highlightthickness=0 if self.config.focus_search_rounded else 1, highlightbackground="#d8e1ea")
+        self.focus_search_container = container
+        self.focus_search_container_window = outer.create_window((0, 0), window=container, anchor="nw")
+
+        search_row = Frame(container, bg="#ffffff")
+        search_row.pack(fill=X)
+        Label(search_row, text="搜索", fg="#8a97a6", bg="#ffffff", font=("Microsoft YaHei UI", 12, "bold")).pack(side=LEFT)
+        entry = Entry(search_row, textvariable=self.focus_search_var, font=("Microsoft YaHei UI", 17))
+        entry.pack(side=LEFT, fill=X, expand=True, padx=(12, 0), ipady=3)
+        entry.bind("<KeyRelease>", self.schedule_focus_search_refresh)
+        entry.bind("<Escape>", lambda _event: self.destroy_focus_search_overlay())
+        entry.bind("<Control-space>", lambda _event: self.destroy_focus_search_overlay())
+        entry.bind("<Control-Key-space>", lambda _event: self.destroy_focus_search_overlay())
+        self.focus_search_entry = entry
+
+        result_box = Frame(container, bg="#ffffff")
+        result_box.pack(fill=BOTH, expand=True, pady=(7, 0))
+        result_canvas = Canvas(result_box, bg="#ffffff", highlightthickness=0)
+        result_scrollbar = ttk.Scrollbar(result_box, orient="vertical", command=result_canvas.yview)
+        result_inner = Frame(result_canvas, bg="#ffffff")
+        result_window = result_canvas.create_window((0, 0), window=result_inner, anchor="nw")
+        result_inner.bind(
+            "<Configure>",
+            lambda _event: result_canvas.configure(scrollregion=result_canvas.bbox("all") or (0, 0, 0, 0)),
+        )
+        result_canvas.bind("<Configure>", lambda event: result_canvas.itemconfigure(result_window, width=event.width))
+        result_canvas.configure(yscrollcommand=result_scrollbar.set)
+        result_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self.focus_search_results = result_inner
+        self.focus_search_results_canvas = result_canvas
+        self.focus_search_result_window = result_window
+        self.focus_search_results_scrollbar = result_scrollbar
+        self.focus_search_var.set(self.search_var.get().strip())
+        self._position_focus_search_overlay(96)
+        overlay.after(30, lambda: self._focus_search_entry_force_focus(entry))
+        overlay.after(40, lambda: entry.selection_range(0, END))
+        self.schedule_focus_search_refresh()
+
+    def _focus_search_entry_force_focus(self, entry) -> None:
+        try:
+            if self.focus_search_overlay is not None:
+                self.focus_search_overlay.lift()
+                self.focus_search_overlay.focus_force()
+            entry.focus_force()
+        except Exception:
+            pass
+
+    def _position_focus_search_overlay(self, height: int) -> None:
+        overlay = self.focus_search_overlay
+        if overlay is None:
+            return
+        width = 640
+        screen_width = overlay.winfo_screenwidth()
+        screen_height = overlay.winfo_screenheight()
+        x = max(24, int((screen_width - width) / 2))
+        center_y = int(screen_height * (1 - 0.618))
+        y = max(24, center_y - int(height / 2))
+        overlay.geometry(f"{width}x{height}+{x}+{y}")
+        self._draw_focus_search_shell(width, height)
+
+    def _draw_focus_search_shell(self, width: int, height: int) -> None:
+        canvas = self.focus_search_outer_canvas
+        if canvas is None:
+            return
+        rounded = bool(self.config.focus_search_rounded)
+        margin = 10 if rounded else 0
+        canvas.configure(width=width, height=height)
+        canvas.delete("shell")
+        if rounded:
+            points = self._rounded_rect_points(margin, margin, width - margin, height - margin, 18)
+            shell = canvas.create_polygon(points, smooth=True, fill="#ffffff", outline="#d8e1ea", tags="shell")
+        else:
+            shell = canvas.create_rectangle(0, 0, width, height, fill="#ffffff", outline="#d8e1ea", tags="shell")
+        canvas.tag_lower(shell)
+        if self.focus_search_container_window is not None:
+            canvas.coords(self.focus_search_container_window, margin, margin)
+            canvas.itemconfigure(self.focus_search_container_window, width=width - margin * 2, height=height - margin * 2)
+            canvas.tag_raise(self.focus_search_container_window)
+
+    @staticmethod
+    def _rounded_rect_points(x1: int, y1: int, x2: int, y2: int, radius: int) -> list[int]:
+        return [
+            x1 + radius, y1,
+            x2 - radius, y1,
+            x2, y1,
+            x2, y1 + radius,
+            x2, y2 - radius,
+            x2, y2,
+            x2 - radius, y2,
+            x1 + radius, y2,
+            x1, y2,
+            x1, y2 - radius,
+            x1, y1 + radius,
+            x1, y1,
+        ]
+
+    def _focus_search_overlay_exists(self) -> bool:
+        overlay = self.focus_search_overlay
+        if overlay is None:
+            return False
+        try:
+            return bool(overlay.winfo_exists())
+        except Exception:
+            return False
+
+    def destroy_focus_search_overlay(self) -> None:
+        if self.focus_search_job is not None:
+            try:
+                self.root.after_cancel(self.focus_search_job)
+            except Exception:
+                pass
+            self.focus_search_job = None
+        overlay = self.focus_search_overlay
+        self.focus_search_overlay = None
+        self.focus_search_entry = None
+        self.focus_search_results = None
+        self.focus_search_outer_canvas = None
+        self.focus_search_container = None
+        self.focus_search_container_window = None
+        self.focus_search_results_canvas = None
+        self.focus_search_result_window = None
+        self.focus_search_results_scrollbar = None
+        if overlay is not None:
+            try:
+                if overlay.winfo_exists():
+                    overlay.destroy()
+            except Exception:
+                pass
+
+    def schedule_focus_search_refresh(self, _event=None) -> None:
+        if self.focus_search_job is not None:
+            try:
+                self.root.after_cancel(self.focus_search_job)
+            except Exception:
+                pass
+        self.focus_search_job = self.root.after(350, self.refresh_focus_search_results)
+
+    def refresh_focus_search_results(self) -> None:
+        self.focus_search_job = None
+        if not self._focus_search_overlay_exists() or self.focus_search_results is None:
+            return
+        for child in self.focus_search_results.winfo_children():
+            child.destroy()
+        query = self.focus_search_var.get().strip()
+        if not query:
+            self._configure_focus_result_scroll(0, False)
+            self._position_focus_search_overlay(96)
+            return
+
+        limit = max(1, min(10, int(getattr(self.config, "focus_search_limit", 5) or 5)))
+        rows = self.db.get_market_rows(query=query, sort_by="latest_at", descending=True, limit=limit)
+        target_currency = self.display_currency_var.get() or self.config.display_currency
+        rate = self.db.get_exalted_per_divine()
+        if not rows:
+            self._configure_focus_result_scroll(36, False)
+            row = Frame(self.focus_search_results, bg="#ffffff", pady=8)
+            row.pack(fill=X)
+            Label(row, text="没有查询到匹配物品", fg="#7b8794", bg="#ffffff", font=("Microsoft YaHei UI", 12)).pack(anchor="w")
+            self._position_focus_search_overlay(144)
+            return
+
+        for index, row_data in enumerate(rows):
+            item = Frame(self.focus_search_results, bg="#ffffff", pady=4)
+            item.pack(fill=X)
+            if index:
+                Canvas(item, height=1, bg="#e8eef5", highlightthickness=0).pack(fill=X, pady=(0, 6))
+            body = Frame(item, bg="#ffffff")
+            body.pack(fill=X)
+            name_box = Frame(body, bg="#ffffff")
+            name_box.pack(side=LEFT, fill=X, expand=True)
+            Label(
+                name_box,
+                text=row_data.item_name,
+                fg="#172033",
+                bg="#ffffff",
+                font=("Microsoft YaHei UI", 13, "bold"),
+                anchor="w",
+            ).pack(anchor="w")
+            subtitle = f"{row_data.source}  {self._format_time(row_data.latest_at)}"
+            Label(name_box, text=subtitle, fg="#8a97a6", bg="#ffffff", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(1, 0))
+            amount = convert_amount(row_data.latest_amount, row_data.latest_currency, target_currency, rate)
+            price_text = f"{amount:g} {target_currency}"
+            price_box = Frame(body, bg="#ffffff")
+            price_box.pack(side=RIGHT, padx=(16, 0))
+            Label(price_box, text=price_text, fg="#c77d00", bg="#ffffff", font=("Microsoft YaHei UI", 13, "bold")).pack(anchor="e")
+            trend_color = "#1f9d55" if row_data.trend_percent.startswith("+") else "#d64545" if row_data.trend_percent.startswith("-") else "#8a97a6"
+            Label(price_box, text=f"趋势 {row_data.trend_percent or '暂无'}", fg=trend_color, bg="#ffffff", font=("Microsoft YaHei UI", 9)).pack(anchor="e")
+            self._bind_focus_result_click_recursive(item, row_data.item_name)
+        visible_rows = min(len(rows), 5)
+        result_height = self._measure_focus_result_height(visible_rows)
+        self._configure_focus_result_scroll(result_height, len(rows) > 5)
+        self._position_focus_search_overlay(96 + result_height)
+
+    def _measure_focus_result_height(self, visible_rows: int) -> int:
+        if self.focus_search_results is None:
+            return max(1, visible_rows) * 64
+        try:
+            self.focus_search_results.update_idletasks()
+            children = self.focus_search_results.winfo_children()[:visible_rows]
+            measured = sum(max(child.winfo_reqheight(), child.winfo_height()) for child in children)
+        except Exception:
+            measured = 0
+        return max(max(1, visible_rows) * 64, measured + 6)
+
+    def _configure_focus_result_scroll(self, height: int, scrollable: bool) -> None:
+        canvas = self.focus_search_results_canvas
+        scrollbar = self.focus_search_results_scrollbar
+        if canvas is None or scrollbar is None:
+            return
+        canvas.configure(height=height)
+        if scrollable:
+            scrollbar.pack(side=RIGHT, fill=Y)
+            self._bind_focus_result_wheel_recursive(canvas, canvas)
+            if self.focus_search_results is not None:
+                self._bind_focus_result_wheel_recursive(self.focus_search_results, canvas)
+        else:
+            scrollbar.pack_forget()
+            canvas.yview_moveto(0)
+        canvas.after_idle(lambda: canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 0, 0)))
+
+    def _bind_focus_result_wheel_recursive(self, widget, canvas) -> None:
+        try:
+            widget.bind("<MouseWheel>", lambda event: canvas.yview_scroll(int(-1 * (event.delta / 120)), "units"))
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_focus_result_wheel_recursive(child, canvas)
+
+    def _bind_focus_result_click_recursive(self, widget, item_name: str) -> None:
+        try:
+            widget.bind("<Button-1>", lambda _event, name=item_name: self._choose_focus_search_item(name), add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_focus_result_click_recursive(child, item_name)
+
+    def _choose_focus_search_item(self, item_name: str) -> None:
+        self.search_var.set(item_name)
+        self._reset_page_and_refresh()
+        self.destroy_focus_search_overlay()
 
     def _show_stats(self, stats: PriceStats) -> None:
         text = (
@@ -1929,6 +2708,207 @@ class PriceTrackerApp:
         self.refresh_market_table()
         self.status_var.set(f"已保存截图价格：{item} = {amount:g} {currency}")
 
+    def quick_price_from_clipboard(self, raw_text: str | None = None) -> None:
+        if raw_text is None:
+            try:
+                self._quick_price_foreground_hwnd = int(ctypes.windll.user32.GetForegroundWindow())
+            except Exception:
+                self._quick_price_foreground_hwnd = 0
+            self._send_ctrl_c()
+            self.progress_var.set("正在读取游戏复制内容...")
+            self.root.after(260, self._quick_price_from_current_clipboard)
+            return
+        self._show_quick_price_for_text(raw_text or "")
+
+    def _quick_price_from_current_clipboard(self) -> None:
+        try:
+            raw_text = self.root.clipboard_get()
+        except Exception:
+            self._set_progress_idle("快速查价：未读取到物品")
+            self._show_quick_price_overlay("未读取到物品", "请把鼠标放在物品上，再按快速查价键。", "", "")
+            return
+        self._show_quick_price_for_text(raw_text or "")
+
+    @staticmethod
+    def _send_ctrl_c() -> None:
+        user32 = ctypes.windll.user32
+        ctrl = 0x11
+        c_key = 0x43
+        keyup = 0x0002
+        user32.keybd_event(ctrl, 0, 0, 0)
+        user32.keybd_event(c_key, 0, 0, 0)
+        user32.keybd_event(c_key, 0, keyup, 0)
+        user32.keybd_event(ctrl, 0, keyup, 0)
+
+    def _show_quick_price_for_text(self, raw_text: str) -> None:
+        item = parse_poe_clipboard_item(raw_text)
+        if not item.item_name:
+            self._set_progress_idle("快速查价：未识别到物品")
+            self._show_quick_price_overlay("未识别到物品名", "剪贴板内容不是可识别的游戏物品。", "", "")
+            return
+        stats = self.db.get_stats(item.item_name)
+        if not stats:
+            self._set_progress_idle(f"快速查价：未查询到 {item.item_name}")
+            self._show_quick_price_overlay(item.item_name, "没有本地价格记录", item.rarity, "")
+            return
+        history = self.db.get_price_history(stats.item_name, limit=12)
+        trend = trend_percent([record.amount for record in history])
+        price = f"{stats.latest_amount:g} {stats.latest_currency}"
+        subtitle = item.rarity or "本地物价"
+        self._set_progress_idle(f"快速查价：{stats.item_name} {price}")
+        self._show_quick_price_overlay(stats.item_name, price, subtitle, trend)
+
+    def _show_quick_price_overlay(self, title: str, price: str, subtitle: str, trend: str) -> None:
+        width, height = 430, 230
+        trend_color = "#2fb344" if trend.startswith("+") else "#e03131" if trend.startswith("-") else "#9fb5cf"
+        overlay = self.quick_price_overlay
+        if overlay is None or not self._toplevel_exists(overlay):
+            overlay = Toplevel(self.root)
+            self.quick_price_overlay = overlay
+            overlay.overrideredirect(True)
+            overlay.attributes("-topmost", True)
+            try:
+                overlay.attributes("-alpha", 0.92)
+            except Exception:
+                pass
+            overlay.configure(bg="#10151d")
+            overlay.bind("<Escape>", lambda _event: self._destroy_quick_price_overlay())
+
+            frame = Frame(overlay, bg="#10151d", padx=22, pady=20)
+            frame.pack(fill=BOTH, expand=True)
+            subtitle_label = Label(frame, fg="#9fb5cf", bg="#10151d", font=("Microsoft YaHei UI", 11))
+            subtitle_label.pack(anchor="w")
+            title_label = Label(
+                frame,
+                fg="#f8fafc",
+                bg="#10151d",
+                font=("Microsoft YaHei UI", 18, "bold"),
+                wraplength=380,
+                justify=LEFT,
+            )
+            title_label.pack(anchor="w", pady=(8, 12))
+            price_label = Label(frame, fg="#ffd166", bg="#10151d", font=("Microsoft YaHei UI", 22, "bold"))
+            price_label.pack(anchor="w")
+            trend_label = Label(
+                frame,
+                bg="#10151d",
+                font=("Microsoft YaHei UI", 13, "bold"),
+            )
+            trend_label.pack(anchor="w", pady=(14, 0))
+            hint_label = Label(
+                frame,
+                text="点击或 Esc 关闭，5 秒后自动隐藏",
+                fg="#718096",
+                bg="#10151d",
+                font=("Microsoft YaHei UI", 10),
+            )
+            hint_label.pack(anchor="e", side="bottom")
+            self.quick_price_overlay_labels = {
+                "subtitle": subtitle_label,
+                "title": title_label,
+                "price": price_label,
+                "trend": trend_label,
+            }
+            self._bind_destroy_on_click_recursive(overlay, overlay)
+
+        labels = self.quick_price_overlay_labels
+        labels["subtitle"].configure(text=subtitle or "快速查价")
+        labels["title"].configure(text=title)
+        labels["price"].configure(text=price)
+        labels["trend"].configure(text=f"趋势 {trend or '暂无'}", fg=trend_color)
+        x = max(24, min(self.root.winfo_pointerx() + 24, overlay.winfo_screenwidth() - width - 24))
+        y = max(24, min(self.root.winfo_pointery() + 24, overlay.winfo_screenheight() - height - 24))
+        overlay.geometry(f"{width}x{height}+{x}+{y}")
+        overlay.lift()
+        self.root.after(40, self._restore_quick_price_foreground)
+        if self.quick_price_overlay_hide_job is not None:
+            try:
+                self.root.after_cancel(self.quick_price_overlay_hide_job)
+            except Exception:
+                pass
+        self.quick_price_overlay_hide_job = self.root.after(5000, self._destroy_quick_price_overlay)
+        self.quick_price_overlay_watch_token += 1
+        token = self.quick_price_overlay_watch_token
+        left_down = self._left_mouse_down()
+        self.root.after(60, lambda: self._watch_quick_price_overlay(overlay, time.monotonic(), not left_down, left_down, token))
+
+    @staticmethod
+    def _toplevel_exists(window: Toplevel) -> bool:
+        try:
+            return bool(window.winfo_exists())
+        except Exception:
+            return False
+
+    def _destroy_quick_price_overlay(self) -> None:
+        overlay = self.quick_price_overlay
+        if self.quick_price_overlay_hide_job is not None:
+            try:
+                self.root.after_cancel(self.quick_price_overlay_hide_job)
+            except Exception:
+                pass
+            self.quick_price_overlay_hide_job = None
+        self.quick_price_overlay_watch_token += 1
+        self.quick_price_overlay = None
+        self.quick_price_overlay_labels = {}
+        if overlay is not None and self._toplevel_exists(overlay):
+            overlay.destroy()
+
+    @staticmethod
+    def _left_mouse_down() -> bool:
+        try:
+            return bool(ctypes.windll.user32.GetAsyncKeyState(0x01) & 0x8000)
+        except Exception:
+            return False
+
+    def _bind_destroy_on_click_recursive(self, widget, target: Toplevel) -> None:
+        try:
+            widget.bind("<Button-1>", lambda _event: self._destroy_quick_price_overlay(), add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_destroy_on_click_recursive(child, target)
+
+    def _watch_quick_price_overlay(
+        self,
+        overlay: Toplevel,
+        created_at: float,
+        click_armed: bool,
+        was_left_down: bool,
+        token: int,
+    ) -> None:
+        try:
+            if token != self.quick_price_overlay_watch_token or not overlay.winfo_exists():
+                return
+            user32 = ctypes.windll.user32
+            if user32.GetAsyncKeyState(0x1B) & 0x0001:
+                self._destroy_quick_price_overlay()
+                return
+            left_down = bool(user32.GetAsyncKeyState(0x01) & 0x8000)
+            if not click_armed:
+                click_armed = not left_down
+            elif left_down and not was_left_down:
+                point = wintypes.POINT()
+                user32.GetCursorPos(ctypes.byref(point))
+                left = overlay.winfo_rootx()
+                top = overlay.winfo_rooty()
+                right = left + overlay.winfo_width()
+                bottom = top + overlay.winfo_height()
+                if not (left <= point.x <= right and top <= point.y <= bottom):
+                    self._destroy_quick_price_overlay()
+                    return
+        except Exception:
+            return
+        self.root.after(80, lambda: self._watch_quick_price_overlay(overlay, created_at, click_armed, left_down, token))
+
+    def _restore_quick_price_foreground(self) -> None:
+        hwnd = int(getattr(self, "_quick_price_foreground_hwnd", 0) or 0)
+        if not hwnd:
+            return
+        try:
+            ctypes.windll.user32.SetForegroundWindow(hwnd)
+        except Exception:
+            pass
+
     def open_capture_workbench(self) -> None:
         try:
             image_path = capture_full_screen(self.config.screenshots_path, "workbench")
@@ -1964,30 +2944,39 @@ class PriceTrackerApp:
     def _recognize_selected_area(self, image_path: Path, box: tuple[int, int, int, int]) -> None:
         self.root.deiconify()
         try:
-            crop_path = crop_image(image_path, box, self.config.screenshots_path, "selected-area")
+            crop_path = crop_image(image_path, box, self.config.screenshots_path, "selected-area", enhance=False)
         except Exception as exc:
             messagebox.showerror("裁剪失败", str(exc))
             return
-        ocr = TesseractOcr(
-            self.config.tesseract_cmd,
-            self.config.ocr_languages,
-            self.config.ocr_psm,
-        )
-        result = ocr.recognize(crop_path)
-        rows = parse_item_price_rows(result.text, default_currency="Exalted Orb")
-        if not rows:
-            message = result.message or "没有识别到 item-price 行。请尝试框得更紧一些，或确认本地 OCR 已安装中文语言包。"
-            messagebox.showwarning("未识别到价格列表", message)
-            self._show_ocr_diagnostic(image_path, crop_path, parse_ocr_text(result.text), message)
-            return
-        OcrReviewDialog(
-            self.root,
-            self.db,
-            rows,
-            result.text,
-            crop_path,
-            self._refresh_recent,
-        )
+        self.ocr_review_rows = []
+        self.ocr_review_raw_text = ""
+        self.ocr_review_image_path = crop_path
+        self.ocr_selected_index = None
+        self.show_ocr_review_page()
+        self._set_ocr_running_ui(True)
+        self._set_progress_busy("正在识别截图内容...")
+        self.status_var.set("正在识别截图内容，请稍候。")
+        threading.Thread(target=self._recognize_selected_area_worker, args=(crop_path,), daemon=True).start()
+
+    def _recognize_selected_area_worker(self, crop_path: Path) -> None:
+        worker_db = None
+        try:
+            ocr = RapidOcr()
+            result = ocr.recognize(crop_path)
+            worker_db = PriceDatabase(self.config.database_path)
+            rows = recognize_structured_prices(crop_path, result, db=worker_db, default_currency="崇高石")
+            if not rows:
+                rows = parse_item_price_rows(result.text, default_currency="崇高石")
+            if not rows:
+                message = result.message or "没有识别到价格列表。请尝试框得更紧一些，或在配置中检查截图识别功能。"
+                self.events.put(("ocr_recognized", False, [], result.text, str(crop_path), message))
+                return
+            self.events.put(("ocr_recognized", True, rows, result.text, str(crop_path), ""))
+        except Exception as exc:
+            self.events.put(("ocr_recognized", False, [], "", str(crop_path), str(exc)))
+        finally:
+            if worker_db is not None:
+                worker_db.close()
 
     def open_image_workbench(self) -> None:
         path = filedialog.askopenfilename(
@@ -2024,16 +3013,12 @@ class PriceTrackerApp:
             messagebox.showerror("截图失败", str(exc))
             return None, Path(), str(exc)
 
-        self.ocr = TesseractOcr(
-            self.config.tesseract_cmd,
-            self.config.ocr_languages,
-            self.config.ocr_psm,
-        )
+        self.ocr = RapidOcr()
         ocr_result = self.ocr.recognize(image_path)
         parsed = parse_ocr_text(ocr_result.text)
         message = ocr_result.message
         if not ocr_result.ok and not message:
-            message = "OCR 未返回文本"
+            message = "识别未返回文本"
         return parsed, image_path, message
 
     def diagnose_image_ocr(self) -> None:
@@ -2056,11 +3041,7 @@ class PriceTrackerApp:
             messagebox.showerror("图片预处理失败", str(exc))
             return
 
-        self.ocr = TesseractOcr(
-            self.config.tesseract_cmd,
-            self.config.ocr_languages,
-            self.config.ocr_psm,
-        )
+        self.ocr = RapidOcr()
         ocr_result = self.ocr.recognize(prepared_path)
         parsed = parse_ocr_text(ocr_result.text)
         self._show_ocr_diagnostic(Path(path), prepared_path, parsed, ocr_result.message)
@@ -2073,7 +3054,7 @@ class PriceTrackerApp:
         message: str,
     ) -> None:
         window = Toplevel(self.root)
-        window.title("OCR 诊断")
+        window.title("识别诊断")
         window.geometry("760x620")
         window.transient(self.root)
 
@@ -2087,10 +3068,10 @@ class PriceTrackerApp:
             f"识别价格："
             f"{'' if parsed.amount is None else f'{parsed.amount:g}'} {parsed.currency}\n"
             f"置信度：{parsed.confidence:.2f}\n"
-            f"{'OCR 提示：' + message if message else ''}"
+            f"{'识别提示：' + message if message else ''}"
         )
         Label(body, text=summary, justify=LEFT, anchor="w").pack(fill=X)
-        Label(body, text="原始 OCR 文本").pack(anchor="w", pady=(10, 0))
+        Label(body, text="原始识别文本").pack(anchor="w", pady=(10, 0))
         raw = Text(body, height=20, wrap="word")
         raw.pack(fill=BOTH, expand=True)
         raw.insert("1.0", parsed.raw_text)
@@ -2119,11 +3100,7 @@ class PriceTrackerApp:
     def open_settings(self) -> None:
         dialog = SettingsDialog(self.root, self.config)
         self.root.wait_window(dialog.window)
-        self.ocr = TesseractOcr(
-            self.config.tesseract_cmd,
-            self.config.ocr_languages,
-            self.config.ocr_psm,
-        )
+        self.ocr = RapidOcr()
         self.reload_hotkeys()
         self.status_var.set(f"设置已加载。数据目录：{self.config.data_path}")
 
@@ -2138,8 +3115,7 @@ class PriceTrackerApp:
                 f"{info.message}\n当前：{info.current_version}\n最新：{info.latest_version}\n\n下载并安装？",
             ):
                 self.updating = True
-                self.progress.configure(mode="determinate", maximum=100, value=0)
-                self.progress_var.set("正在下载更新...")
+                self._set_progress_percent(0, "正在下载更新...")
                 threading.Thread(target=self._download_update_worker, args=(info,), daemon=True).start()
             return
         messagebox.showinfo(
@@ -2169,14 +3145,58 @@ class PriceTrackerApp:
         except Exception as exc:
             self.events.put(("update_done", False, "", str(exc)))
 
+    def _sync_state_path(self) -> Path:
+        return self.config.data_path / "sync_state.json"
+
+    def _read_sync_state(self) -> dict:
+        try:
+            path = self._sync_state_path()
+            if not path.exists():
+                return {}
+            return json.loads(path.read_text(encoding="utf-8"))
+        except Exception:
+            return {}
+
+    def _write_sync_state(self, state: dict) -> None:
+        try:
+            self.config.data_path.mkdir(parents=True, exist_ok=True)
+            self._sync_state_path().write_text(json.dumps(state, ensure_ascii=False, indent=2), encoding="utf-8")
+        except OSError:
+            return
+
+    def _economy_sync_remaining_seconds(self) -> int:
+        value = str(self._read_sync_state().get("last_economy_sync_attempt_at", ""))
+        if not value:
+            return 0
+        try:
+            last = datetime.fromisoformat(value)
+        except ValueError:
+            return 0
+        elapsed = (datetime.now() - last).total_seconds()
+        return max(0, int(30 * 60 - elapsed))
+
+    def _record_economy_sync_attempt(self) -> None:
+        state = self._read_sync_state()
+        state["last_economy_sync_attempt_at"] = datetime.now().isoformat(timespec="seconds")
+        self._write_sync_state(state)
+
     def sync_poe2db_currency(self) -> None:
         if self.syncing:
             self.progress_var.set("同步正在进行中，请稍候...")
             return
+        remaining = self._economy_sync_remaining_seconds()
+        if remaining > 0:
+            minutes = remaining // 60
+            seconds = remaining % 60
+            text = f"经济数据同步每 30 分钟最多一次，请 {minutes:02d}:{seconds:02d} 后再试。"
+            self.progress_var.set(text)
+            self.status_var.set(text)
+            messagebox.showinfo("同步冷却中", text)
+            return
+        self._record_economy_sync_attempt()
         self.syncing = True
-        self.progress_var.set("正在同步 poe2db 经济数据，请稍候...")
+        self._set_progress_percent(0, "正在同步 poe2db 经济数据，请稍候...")
         self.status_var.set("同步中...")
-        self.progress.configure(mode="determinate", maximum=100, value=0)
         threading.Thread(target=self._sync_worker, daemon=True).start()
 
     def _sync_worker(self) -> None:
@@ -2184,7 +3204,7 @@ class PriceTrackerApp:
             batch = fetch_all_economy_prices(
                 progress=lambda index, total, category, url: self.events.put(
                     ("sync_progress", index, total, category, url)
-                )
+                ),
             )
         except Exception as exc:
             self.events.put(("sync_error", f"无法同步 poe2db：{exc}"))
@@ -2193,13 +3213,12 @@ class PriceTrackerApp:
 
     def _finish_sync(self, batch, _finished_at: str) -> None:
         self.syncing = False
-        self.progress.configure(mode="indeterminate", value=0)
         results = batch.results
         if not results:
             detail = "\n".join(batch.errors[:8]) if batch.errors else "没有返回任何分类数据。"
             messagebox.showerror("同步失败", f"没有同步到数据。\n\n{detail}")
             self.status_var.set("poe2db 同步失败。")
-            self.progress_var.set("同步失败，未获得数据。")
+            self._set_progress_idle("同步失败，未获得数据。")
             return
         saved = 0
         for result in results:
@@ -2217,7 +3236,7 @@ class PriceTrackerApp:
         self.refresh_market_table()
         warning = f"\n\n部分分类失败：\n" + "\n".join(batch.errors[:6]) if batch.errors else ""
         self.status_var.set(f"poe2db 同步完成：{saved} 条。")
-        self.progress_var.set(f"同步完成：{len(results)} 个分类，{saved} 条数据。")
+        self._set_progress_idle(f"同步完成：{len(results)} 个分类，{saved} 条数据。")
         messagebox.showinfo("同步完成", f"已同步 {saved} 条 poe2db 经济数据。{warning}")
 
     def close(self) -> None:
@@ -2242,7 +3261,7 @@ class PriceTrackerApp:
             self._ignore_unmap_prompt = False
             to_tray = messagebox.askyesno(
                 "最小化方式",
-                "最小化到右下角小图标？\n\n是：后台运行\n否：保留在任务栏",
+                "最小化后是否隐藏到右下角小图标？\n\n选择“是”：隐藏窗口，继续后台运行。\n选择“否”：保留在任务栏。",
             )
             self.config.minimize_action = "tray" if to_tray else "taskbar"
             self.minimize_action_var.set(self._window_action_label(self.config.minimize_action, "minimize"))
@@ -2260,7 +3279,7 @@ class PriceTrackerApp:
         if action == "ask":
             to_tray = messagebox.askyesno(
                 "关闭窗口",
-                "关闭后继续后台运行？\n\n是：最小化到右下角\n否：退出软件",
+                "点击关闭时是否继续后台运行？\n\n选择“是”：隐藏到右下角小图标。\n选择“否”：退出软件。",
             )
             self.config.close_action = "tray" if to_tray else "exit"
             self.close_action_var.set(self._window_action_label(self.config.close_action, "close"))
@@ -2319,12 +3338,26 @@ class PriceTrackerApp:
     def restore_from_tray(self) -> None:
         self.root.deiconify()
         self.root.lift()
-        if self.tray_icon:
-            self.tray_icon.stop()
-            self.tray_icon = None
+
+
+def _acquire_single_instance() -> bool:
+    global _INSTANCE_MUTEX_HANDLE
+    try:
+        handle = ctypes.windll.kernel32.CreateMutexW(None, False, "Local\\PoE2PriceTrackerSingleInstance")
+        if not handle:
+            return True
+        _INSTANCE_MUTEX_HANDLE = handle
+        if ctypes.windll.kernel32.GetLastError() == ERROR_ALREADY_EXISTS:
+            ctypes.windll.user32.MessageBoxW(None, "程序已在运行。", "流放之路2 物价追踪", 0x00000040)
+            return False
+    except Exception:
+        return True
+    return True
 
 
 def main() -> None:
+    if not _acquire_single_instance():
+        sys.exit(0)
     if tb is not None:
         root = tb.Window(themename="flatly")
     else:

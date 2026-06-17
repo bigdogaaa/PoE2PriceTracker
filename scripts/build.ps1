@@ -2,12 +2,21 @@ param(
     [string]$Python = "py",
     [string[]]$PythonArgs = @("-3.12"),
     [string]$AppName = "PoE2PriceTracker",
+    [string]$Version = "",
     [switch]$OneFile
 )
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root
+
+if (-not $Version) {
+    $ProjectText = Get-Content -Path "pyproject.toml" -Raw
+    if ($ProjectText -match 'version\s*=\s*"([^"]+)"') {
+        $Version = $Matches[1]
+    }
+}
+$BuildName = if ($OneFile -and $Version) { "$AppName-$Version" } else { $AppName }
 
 function Invoke-Checked {
     param([string]$Exe, [string[]]$ArgList)
@@ -35,15 +44,20 @@ if ($LASTEXITCODE -ne 0) {
 
 Invoke-Checked $BuildPython @("-m", "pip", "install", "--upgrade", "pip")
 Invoke-Checked $BuildPython @("-m", "pip", "install", "-r", "requirements-build.txt")
+Invoke-Checked $BuildPython @("-m", "pip", "install", "-r", "requirements.txt")
 
 $PyInstallerArgs = @(
     "-m", "PyInstaller",
     "--noconfirm",
     "--clean",
     "--windowed",
-    "--exclude-module", "numpy",
+    "--workpath", "build\$BuildName",
     "--exclude-module", "PIL.ImageQt",
-    "--name", $AppName,
+    "--collect-all", "rapidocr",
+    "--collect-binaries", "onnxruntime",
+    "--hidden-import", "rapidocr",
+    "--hidden-import", "onnxruntime",
+    "--name", $BuildName,
     "--paths", "src",
     "src\poe2_price_tracker\__main__.py"
 )
@@ -57,11 +71,19 @@ if (Test-Path $OcrBundle) {
     Write-Host "Including OCR bundle: $OcrBundle"
 }
 
+$AssetBundle = Join-Path $Root "src\poe2_price_tracker\assets"
+if (Test-Path $AssetBundle) {
+    $PyInstallerArgs = $PyInstallerArgs[0..($PyInstallerArgs.Length - 2)] + @("--add-data", "src\poe2_price_tracker\assets;poe2_price_tracker\assets") + $PyInstallerArgs[($PyInstallerArgs.Length - 1)]
+    Write-Host "Including bundled assets: $AssetBundle"
+}
+
 Invoke-Checked $BuildPython $PyInstallerArgs
 
 if ($OneFile) {
-    Write-Host "Built: $Root\dist\$AppName.exe"
+    $BuiltPath = Join-Path $Root "dist\$BuildName.exe"
+    Write-Host "Built: $BuiltPath"
 }
 else {
-    Write-Host "Built: $Root\dist\$AppName\$AppName.exe"
+    $BuiltPath = Join-Path $Root "dist\$AppName\$AppName.exe"
+    Write-Host "Built: $BuiltPath"
 }
