@@ -5,7 +5,7 @@ import uuid
 from PIL import Image
 
 from poe2_price_tracker.db import PriceDatabase, convert_amount
-from poe2_price_tracker.market_exchange import derive_realtime_price, parse_market_exchange
+from poe2_price_tracker.market_exchange import ParsedMarketExchange, derive_realtime_price, parse_market_exchange
 from poe2_price_tracker.ocr import OcrBox, OcrResult
 
 
@@ -103,6 +103,70 @@ def test_parse_market_exchange_derives_sell_price_when_left_is_trade_currency():
     assert realtime.item_name == "褪色危机碎片"
     assert realtime.side == "卖出"
     assert realtime.amount == 489
+    assert realtime.currency == "崇高石"
+
+
+def test_parse_market_exchange_derives_price_when_both_sides_are_primary_currencies():
+    image_path = _workspace_image_path()
+    Image.new("RGB", (900, 220), "#222").save(image_path)
+    result = OcrResult(
+        text="需求物品\n神圣石\n拥有物品\n崇高石\n1:150\n1:150",
+        engine="rapidocr",
+        ok=True,
+        boxes=(
+            box("需求物品", 110, 10, 200, 36),
+            box("拥有物品", 700, 10, 790, 36),
+            box("1:150", 420, 18, 510, 38),
+            box("1:150", 440, 70, 530, 92),
+            box("神圣石", 80, 70, 150, 94),
+            box("崇高石", 690, 70, 760, 94),
+        ),
+    )
+
+    realtime = derive_realtime_price(parse_market_exchange(image_path, result))
+
+    assert realtime.item_name == "神圣石"
+    assert realtime.side == "买入"
+    assert realtime.amount == 150
+    assert realtime.currency == "崇高石"
+    assert realtime.message == "基础通货兑换"
+
+
+def test_base_currency_exchange_prefers_chaos_over_exalted():
+    realtime = derive_realtime_price(
+        ParsedMarketExchange(
+            want_item="崇高石",
+            have_item="混沌石",
+            market_want_amount=1,
+            market_have_amount=5,
+            want_item_is_currency=True,
+            have_item_is_currency=True,
+            confidence=1,
+        )
+    )
+
+    assert realtime.item_name == "混沌石"
+    assert realtime.side == "卖出"
+    assert realtime.amount == 0.2
+    assert realtime.currency == "崇高石"
+
+
+def test_base_currency_exchange_uses_inverse_when_preferred_currency_is_on_right():
+    realtime = derive_realtime_price(
+        ParsedMarketExchange(
+            want_item="混沌石",
+            have_item="崇高石",
+            market_want_amount=5,
+            market_have_amount=1,
+            want_item_is_currency=True,
+            have_item_is_currency=True,
+            confidence=1,
+        )
+    )
+
+    assert realtime.item_name == "混沌石"
+    assert realtime.side == "买入"
+    assert realtime.amount == 0.2
     assert realtime.currency == "崇高石"
 
 

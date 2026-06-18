@@ -50,7 +50,7 @@ class AppConfig:
     screenshot_retention_count: int = 20
     show_ocr_review_details: bool = True
     realtime_min_upvotes: int = 0
-    price_share_service_url: str = "http://123.56.176.147:8787"
+    price_share_service_url: str = "http://117.50.51.78:8787"
     minimize_action: str = "ask"
     close_action: str = "ask"
     visible_columns: list[str] = field(

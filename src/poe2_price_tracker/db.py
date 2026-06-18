@@ -955,13 +955,14 @@ class PriceDatabase:
         for row in rows:
             history_currency = str(row["latest_currency"])
             trend_match = __import__("re").search(r"trend=([+-]?\d+(?:\.\d+)?%)", str(row["latest_raw_text"]))
-            if int(row["count"]) >= 2:
-                history = self.get_price_history(
-                    str(row["item_name"]),
-                    limit=12,
-                    min_realtime_upvotes=min_upvotes,
-                    prefer_realtime_if_available=True,
-                )
+            history = self.get_price_history(
+                str(row["item_name"]),
+                limit=12,
+                min_realtime_upvotes=min_upvotes,
+                prefer_realtime_if_available=True,
+            )
+            has_realtime_history = any(record.realtime_record_id > 0 for record in history)
+            if len(history) >= 2:
                 if conversion_rate is None:
                     conversion_rate = self.get_exalted_per_divine()
                 chaos_per_divine = self.get_chaos_per_divine()
@@ -972,7 +973,7 @@ class PriceDatabase:
             else:
                 history_values = []
             local_trend = trend_percent(history_values)
-            display_trend = local_trend if len(history_values) >= 2 else (trend_match.group(1) if trend_match else "")
+            display_trend = local_trend if len(history_values) >= 2 else ("" if has_realtime_history else (trend_match.group(1) if trend_match else ""))
             result.append(
                 MarketRow(
                     item_id=int(row["item_id"]),
@@ -1605,21 +1606,17 @@ class PriceDatabase:
             return 0
         return int(row["upvotes"] or 0) - int(row["downvotes"] or 0)
 
-    def _latest_currency_quote(
+    def _currency_quote_candidates(
         self,
         item_aliases: tuple[str, ...],
         currency_aliases: tuple[str, ...],
-        source_prefix: str = "",
-    ) -> tuple[float, str, int] | None:
+    ) -> list[tuple[float, str, int]]:
         normalized_items = tuple(normalize_name(name) for name in item_aliases)
         normalized_currencies = tuple(alias.strip().lower() for alias in currency_aliases)
         if not normalized_items or not normalized_currencies:
-            return None
-        source_sql = "AND r.source LIKE ?" if source_prefix else ""
+            return []
         params: list[object] = [*normalized_items, *normalized_currencies]
-        if source_prefix:
-            params.append(f"{source_prefix}%")
-        row = self.conn.execute(
+        rows = self.conn.execute(
             f"""
             SELECT r.amount, r.captured_at, r.id
             FROM price_records r
@@ -1627,32 +1624,26 @@ class PriceDatabase:
             WHERE i.normalized_name IN ({",".join("?" for _ in normalized_items)})
               AND lower(trim(r.currency)) IN ({",".join("?" for _ in normalized_currencies)})
               AND r.amount > 0
-              {source_sql}
             ORDER BY r.captured_at DESC, r.id DESC
-            LIMIT 1
             """,
             tuple(params),
-        ).fetchone()
-        if row is None:
-            return None
-        return float(row["amount"]), str(row["captured_at"]), int(row["id"])
+        ).fetchall()
+        return [(float(row["amount"]), str(row["captured_at"]), int(row["id"])) for row in rows]
 
     def get_exalted_per_divine(self) -> float:
         divine_aliases = ("神圣石", "Divine Orb", "divine")
         exalted_aliases = ("崇高石", "Exalted Orb", "exalt", "exalted")
-        for source_prefix in ("poe2db-", ""):
-            candidates: list[tuple[str, int, float]] = []
-            direct = self._latest_currency_quote(divine_aliases, exalted_aliases, source_prefix)
-            if direct is not None:
-                amount, captured_at, record_id = direct
+        candidates: list[tuple[str, int, float]] = []
+        for amount, captured_at, record_id in self._currency_quote_candidates(divine_aliases, exalted_aliases):
+            if 10 <= amount <= 1000:
                 candidates.append((captured_at, record_id, amount))
-            inverse = self._latest_currency_quote(exalted_aliases, divine_aliases, source_prefix)
-            if inverse is not None:
-                amount, captured_at, record_id = inverse
-                candidates.append((captured_at, record_id, 1.0 / amount))
-            if candidates:
-                candidates.sort(reverse=True)
-                return candidates[0][2]
+        for amount, captured_at, record_id in self._currency_quote_candidates(exalted_aliases, divine_aliases):
+            rate = 1.0 / amount
+            if 10 <= rate <= 1000:
+                candidates.append((captured_at, record_id, rate))
+        if candidates:
+            candidates.sort(reverse=True)
+            return candidates[0][2]
         return 160.0
 
     def get_chaos_per_divine(self) -> float:
@@ -1660,27 +1651,18 @@ class PriceDatabase:
         exalted_aliases = ("崇高石", "Exalted Orb", "exalt", "exalted")
         chaos_aliases = ("混沌石", "Chaos Orb", "chaos")
         exalted_per_divine = self.get_exalted_per_divine()
-        for source_prefix in ("poe2db-", ""):
-            candidates: list[tuple[str, int, float]] = []
-            direct = self._latest_currency_quote(divine_aliases, chaos_aliases, source_prefix)
-            if direct is not None:
-                amount, captured_at, record_id = direct
-                candidates.append((captured_at, record_id, amount))
-            inverse = self._latest_currency_quote(chaos_aliases, divine_aliases, source_prefix)
-            if inverse is not None:
-                amount, captured_at, record_id = inverse
-                candidates.append((captured_at, record_id, 1.0 / amount))
-            direct_exalted = self._latest_currency_quote(exalted_aliases, chaos_aliases, source_prefix)
-            if direct_exalted is not None:
-                amount, captured_at, record_id = direct_exalted
-                candidates.append((captured_at, record_id, amount * exalted_per_divine))
-            inverse_exalted = self._latest_currency_quote(chaos_aliases, exalted_aliases, source_prefix)
-            if inverse_exalted is not None:
-                amount, captured_at, record_id = inverse_exalted
-                candidates.append((captured_at, record_id, exalted_per_divine / amount))
-            if candidates:
-                candidates.sort(reverse=True)
-                return candidates[0][2]
+        candidates: list[tuple[str, int, float]] = []
+        for amount, captured_at, record_id in self._currency_quote_candidates(divine_aliases, chaos_aliases):
+            candidates.append((captured_at, record_id, amount))
+        for amount, captured_at, record_id in self._currency_quote_candidates(chaos_aliases, divine_aliases):
+            candidates.append((captured_at, record_id, 1.0 / amount))
+        for amount, captured_at, record_id in self._currency_quote_candidates(exalted_aliases, chaos_aliases):
+            candidates.append((captured_at, record_id, amount * exalted_per_divine))
+        for amount, captured_at, record_id in self._currency_quote_candidates(chaos_aliases, exalted_aliases):
+            candidates.append((captured_at, record_id, exalted_per_divine / amount))
+        if candidates:
+            candidates.sort(reverse=True)
+            return candidates[0][2]
         return 10.0
 
     def get_price_history(

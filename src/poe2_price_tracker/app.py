@@ -1309,12 +1309,16 @@ class PriceTrackerApp:
         side = Combobox(result_box, textvariable=self.realtime_side_var, values=["买入", "卖出"], state="readonly", width=8)
         self._enable_combo_full_click(side).grid(row=0, column=3, sticky="ew", padx=(0, 16), pady=4)
         Label(result_box, text="价格").grid(row=0, column=4, sticky="w", padx=(0, 8), pady=4)
-        Entry(result_box, textvariable=self.realtime_amount_var, font=("Microsoft YaHei UI", self.config.font_size + 1)).grid(
+        Entry(
+            result_box,
+            textvariable=self.realtime_amount_var,
+            font=("Microsoft YaHei UI", self.config.font_size + 1),
+            state="readonly",
+        ).grid(
             row=0, column=5, sticky="ew", padx=(0, 16), pady=4
         )
         Label(result_box, text="单位").grid(row=0, column=6, sticky="w", padx=(0, 8), pady=4)
-        unit = Combobox(result_box, textvariable=self.realtime_currency_var, values=["神圣石", "崇高石", "混沌石"], state="readonly", width=10)
-        self._enable_combo_full_click(unit).grid(row=0, column=7, sticky="ew", pady=4)
+        Entry(result_box, textvariable=self.realtime_currency_var, state="readonly").grid(row=0, column=7, sticky="ew", pady=4)
 
         Entry(result_box, textvariable=self.realtime_confidence_var, state="readonly").grid(
             row=1, column=0, columnspan=8, sticky="ew", pady=(8, 0)
@@ -1392,8 +1396,14 @@ class PriceTrackerApp:
 
     def _market_exchange_check_text(self, parsed: ParsedMarketExchange, realtime: ParsedRealtimePrice) -> str:
         if realtime.item_name and realtime.amount and realtime.currency:
-            return f"已解析为{realtime.side}价，请核对后提交。"
-        return "请修订物品、价格和单位。"
+            return f"已解析为{realtime.side}价，请只修正物品名或交易方向。"
+        return "未识别到完整价格比例，请重新框选市场区域。"
+
+    @staticmethod
+    def _format_market_exchange_ratio(parsed: ParsedMarketExchange) -> str:
+        if parsed.market_want_amount <= 0 or parsed.market_have_amount <= 0:
+            return "比例未识别"
+        return f"比例 {parsed.market_want_amount:g}:{parsed.market_have_amount:g}"
 
     def _market_exchange_name_flags(self, item_name: str) -> tuple[str, bool, bool]:
         normalized = normalize_name(item_name)
@@ -1422,21 +1432,20 @@ class PriceTrackerApp:
             return
         item_name = self.realtime_item_var.get().strip()
         side = self.realtime_side_var.get().strip() or "买入"
-        currency = self.realtime_currency_var.get().strip() or "崇高石"
+        parsed = self.market_exchange_parsed
+        realtime = self.realtime_price_parsed
+        currency = realtime.currency.strip()
         if not item_name:
             messagebox.showwarning("缺少物品", "请确认要记录价格的物品。")
             return
-        try:
-            amount = float(self.realtime_amount_var.get().strip().replace(",", "."))
-        except ValueError:
-            messagebox.showwarning("价格格式错误", "价格需要填写数字。")
-            return
+        amount = float(realtime.amount or 0)
         if amount <= 0:
-            messagebox.showwarning("价格格式错误", "价格必须大于 0。")
+            messagebox.showwarning("缺少价格", "未识别到有效价格比例，请重新框选市场区域。")
+            return
+        if not currency:
+            messagebox.showwarning("缺少单位", "未识别到价格单位，请重新框选市场区域。")
             return
         item_match, item_known, _is_currency = self._market_exchange_name_flags(item_name)
-        parsed = self.market_exchange_parsed
-        realtime = self.realtime_price_parsed
         record_id = self.db.add_realtime_price_record(
             item_name=item_name,
             side=side,
@@ -4379,7 +4388,7 @@ class PriceTrackerApp:
 
         hint = Label(
             frame,
-            text="确认识别结果后提交，记录会写入实时价格并同步到物价列表。",
+            text="确认识别结果后提交。只允许修正物品名和买入/卖出方向，价格比例由截图自动计算。",
             fg="#7b8794",
             bg="#ffffff",
             font=("Microsoft YaHei UI", 10),
@@ -4466,21 +4475,14 @@ class PriceTrackerApp:
         side_note = note_label(2, "根据左右通货自动判断")
 
         field_label(3, "价格")
-        amount_entry = Entry(input_cell(3), textvariable=self.realtime_amount_var)
+        amount_entry = Entry(input_cell(3), textvariable=self.realtime_amount_var, state="readonly")
         amount_entry.grid(row=0, column=0, sticky="ew")
-        amount_note = note_label(3, "只填写数字")
+        amount_note = note_label(3, "按比例自动计算")
 
         field_label(4, "单位")
-        currency_combo = Combobox(
-            input_cell(4),
-            textvariable=self.realtime_currency_var,
-            values=["神圣石", "崇高石", "混沌石"],
-            state="readonly",
-            style="RealtimeImport.TCombobox",
-            height=3,
-        )
-        currency_combo.grid(row=0, column=0, sticky="ew")
-        currency_note = note_label(4, "常用流通通货")
+        currency_entry = Entry(input_cell(4), textvariable=self.realtime_currency_var, state="readonly")
+        currency_entry.grid(row=0, column=0, sticky="ew")
+        currency_note = note_label(4, "按通货关系自动判断")
 
         message = Label(
             frame,
@@ -4523,13 +4525,11 @@ class PriceTrackerApp:
             "item_entry": item_entry,
             "side_combo": side_combo,
             "amount_entry": amount_entry,
-            "currency_combo": currency_combo,
+            "currency_entry": currency_entry,
         }
-        for widget in (item_entry, amount_entry):
-            widget.bind("<KeyRelease>", lambda _event: self._mark_realtime_import_pending(), add="+")
+        item_entry.bind("<KeyRelease>", lambda _event: self._mark_realtime_import_pending(), add="+")
         item_entry.bind("<KeyRelease>", lambda _event: self._update_realtime_current_price_label(), add="+")
-        for widget in (side_combo, currency_combo):
-            widget.bind("<<ComboboxSelected>>", lambda _event: self._mark_realtime_import_pending(), add="+")
+        side_combo.bind("<<ComboboxSelected>>", lambda _event: self._mark_realtime_import_pending(), add="+")
         self._bind_realtime_import_drag_recursive(frame)
         self._position_realtime_import_overlay()
         return overlay
@@ -4558,7 +4558,7 @@ class PriceTrackerApp:
         labels["side_note"].configure(text="等待结果")
         labels["amount_note"].configure(text="等待结果")
         labels["currency_note"].configure(text="等待结果")
-        labels["message"].configure(text="识别完成后可直接确认提交，也可以先修改表格内容。")
+        labels["message"].configure(text="识别完成后可确认提交；价格和单位会按市场比例自动计算。")
         labels["current_price"].configure(text="当前记录：等待识别")
         labels["submit"].configure(state="disabled")
         self._position_realtime_import_overlay()
@@ -4569,12 +4569,12 @@ class PriceTrackerApp:
         labels = self.realtime_import_labels
         if failed:
             labels["state"].configure(text="未识别", fg="#b42318", bg="#fff1f3")
-            labels["hint"].configure(text="没有识别到可靠价格，可以重新截图，或手动补充后提交。")
+            labels["hint"].configure(text="没有识别到可靠价格，请重新框选完整市场区域。")
             labels["item_note"].configure(text="需要填写")
             labels["side_note"].configure(text="可选择")
-            labels["amount_note"].configure(text="需要填写")
-            labels["currency_note"].configure(text="可选择")
-            labels["message"].configure(text="建议框选完整市场区域，包含左右两侧物品和比例。")
+            labels["amount_note"].configure(text="未识别")
+            labels["currency_note"].configure(text="未识别")
+            labels["message"].configure(text="价格比例不允许手动填写。请重新截图，包含左右两侧物品和比例。")
             labels["current_price"].configure(text="当前记录：未查询")
             self._mark_realtime_import_pending()
         else:
@@ -4582,11 +4582,12 @@ class PriceTrackerApp:
             side = self.realtime_side_var.get().strip() or "买入"
             amount = self.realtime_amount_var.get().strip()
             currency = self.realtime_currency_var.get().strip() or "崇高石"
+            ratio_text = self._format_market_exchange_ratio(self.market_exchange_parsed)
             self._mark_realtime_import_pending()
-            labels["hint"].configure(text="请核对表格内容，确认无误后提交。")
+            labels["hint"].configure(text="请核对物品名和交易方向，价格比例不允许手动修改。")
             labels["item_note"].configure(text="已识别" if item_name and item_name != "未识别物品" else "需要修正")
             labels["side_note"].configure(text=f"识别为{side}价")
-            labels["amount_note"].configure(text="已识别" if amount else "需要填写")
+            labels["amount_note"].configure(text=ratio_text if amount else "未识别")
             labels["currency_note"].configure(text=currency)
             labels["message"].configure(text=self.realtime_confidence_var.get().strip() or "请核对后提交。")
             self._update_realtime_current_price_label()
@@ -4617,15 +4618,13 @@ class PriceTrackerApp:
         if submit is None:
             return
         item_name = self.realtime_item_var.get().strip()
-        try:
-            amount = float(self.realtime_amount_var.get().strip().replace(",", "."))
-        except ValueError:
-            amount = 0
+        amount = float(self.realtime_price_parsed.amount or 0)
+        currency = self.realtime_price_parsed.currency.strip()
         enabled = (
             self.realtime_import_confirmed
             and bool(item_name)
             and amount > 0
-            and bool(self.realtime_currency_var.get().strip())
+            and bool(currency)
         )
         try:
             submit.configure(state="normal" if enabled else "disabled")

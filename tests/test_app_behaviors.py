@@ -4,15 +4,19 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from poe2_price_tracker.app import PriceTrackerApp
+from poe2_price_tracker.market_exchange import ParsedMarketExchange, ParsedRealtimePrice
 from poe2_price_tracker.parser import ParsedItemPrice
 
 
 class _Var:
-    def __init__(self):
-        self.value = ""
+    def __init__(self, value=""):
+        self.value = value
 
     def set(self, value):
         self.value = value
+
+    def get(self):
+        return self.value
 
 
 class _Db:
@@ -21,6 +25,15 @@ class _Db:
 
     def get_chaos_per_divine(self):
         return 1000
+
+
+class _RealtimeDb:
+    def __init__(self):
+        self.record = None
+
+    def add_realtime_price_record(self, **kwargs):
+        self.record = kwargs
+        return 123
 
 
 def test_ocr_row_confidence_prefers_structured_score():
@@ -106,3 +119,52 @@ def test_realtime_submission_credit_uses_new_items_and_significant_price_changes
 
     assert app.realtime_sync_free_uses == 2
     assert app.realtime_sync_credit_score == 0.5
+
+
+def test_realtime_import_save_uses_parsed_price_not_editable_fields():
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    db = _RealtimeDb()
+    app.db = db
+    app.realtime_import_confirmed = True
+    app.realtime_item_var = _Var("用户修正物品")
+    app.realtime_side_var = _Var("卖出")
+    app.realtime_amount_var = _Var("999999")
+    app.realtime_currency_var = _Var("混沌石")
+    app.market_exchange_parsed = ParsedMarketExchange(
+        want_item="神圣石",
+        have_item="崇高石",
+        market_want_amount=1,
+        market_have_amount=150,
+        user_want_amount=1,
+        user_have_amount=150,
+        confidence=0.9,
+    )
+    app.realtime_price_parsed = ParsedRealtimePrice(
+        item_name="神圣石",
+        side="买入",
+        amount=150,
+        currency="崇高石",
+        confidence=0.9,
+    )
+    app.market_exchange_raw_text = "raw"
+    app.market_exchange_image_path = Path("shot.png")
+    app.status_var = _Var()
+    app._market_exchange_name_flags = lambda item_name: (item_name, False, False)
+    app._record_realtime_submission_credit = lambda *_args: None
+    app._submit_realtime_record_to_remote = lambda *_args: None
+    app.refresh_market_table = lambda: None
+    app.destroy_realtime_import_overlay = lambda: None
+
+    app.save_market_exchange_record(show_message=False)
+
+    assert db.record["item_name"] == "用户修正物品"
+    assert db.record["side"] == "卖出"
+    assert db.record["amount"] == 150
+    assert db.record["currency"] == "崇高石"
+
+
+def test_realtime_import_ratio_label_uses_market_ratio():
+    parsed = ParsedMarketExchange(market_want_amount=1, market_have_amount=150)
+
+    assert PriceTrackerApp._format_market_exchange_ratio(parsed) == "比例 1:150"
+    assert PriceTrackerApp._format_market_exchange_ratio(ParsedMarketExchange()) == "比例未识别"

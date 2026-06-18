@@ -46,6 +46,7 @@ class ParsedRealtimePrice:
 
 
 PRIMARY_TRADE_CURRENCIES = {"神圣石", "崇高石", "混沌石"}
+PRIMARY_TRADE_CURRENCY_PRIORITY = ("神圣石", "混沌石", "崇高石")
 _RATIO_RE = re.compile(r"(\d+(?:[.,]\d+)?)\s*[:：]\s*(\d+(?:[.,]\d+)?)")
 _NUMBER_RE = re.compile(r"^\d+(?:[.,]\d+)?$")
 _FRACTION_RE = re.compile(r"^\d+\s*/\s*\d+$")
@@ -244,6 +245,41 @@ def derive_realtime_price(parsed: ParsedMarketExchange, db: Any | None = None) -
 
     if parsed.market_want_amount <= 0 or parsed.market_have_amount <= 0:
         return ParsedRealtimePrice(confidence=parsed.confidence, message="缺少市场比例")
+
+    if want_is_primary and have_is_primary:
+        want_currency = _match_currency_name(want_name, db)[0]
+        have_currency = _match_currency_name(have_name, db)[0]
+        preferred_item = next(
+            (currency for currency in PRIMARY_TRADE_CURRENCY_PRIORITY if currency in {want_currency, have_currency}),
+            want_currency,
+        )
+        if preferred_item == want_currency:
+            amount = parsed.market_have_amount / parsed.market_want_amount
+            return ParsedRealtimePrice(
+                item_name=want_name,
+                item_match=parsed.want_item_match,
+                item_known=parsed.want_item_known,
+                side="买入",
+                amount=amount,
+                currency=have_currency,
+                currency_side="右侧",
+                item_side="左侧",
+                confidence=parsed.confidence,
+                message="基础通货兑换",
+            )
+        amount = parsed.market_want_amount / parsed.market_have_amount
+        return ParsedRealtimePrice(
+            item_name=have_name,
+            item_match=parsed.have_item_match,
+            item_known=parsed.have_item_known,
+            side="卖出",
+            amount=amount,
+            currency=want_currency,
+            currency_side="左侧",
+            item_side="右侧",
+            confidence=parsed.confidence,
+            message="基础通货兑换",
+        )
 
     if have_is_primary and not want_is_primary:
         item_name = want_name
