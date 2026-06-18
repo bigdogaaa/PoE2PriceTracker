@@ -27,8 +27,12 @@ release/
 *.sqlite3-*
 screenshots/
 tmp_ocr/
+tmp_pytest/
 .tmp-*/
 .tmp-*
+1.png
+POE2内置市场价格接入/
+符文识别功能测试图片/
 *.log
 
 # Bundled OCR binaries should be published as release assets, not source
@@ -41,6 +45,7 @@ Tesseract安装后/
 符文识别功能测试图片/
 踩蘑菇说明页.docx
 docs/images/image*.png
+static/dislike.png
 
 # IDE and OS files
 .idea/

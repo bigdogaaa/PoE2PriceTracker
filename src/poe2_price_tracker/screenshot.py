@@ -7,6 +7,11 @@ from pathlib import Path
 
 from PIL import Image, ImageEnhance, ImageFilter, ImageGrab, ImageOps
 
+try:
+    FAST_RESAMPLE = Image.Resampling.BILINEAR
+except AttributeError:
+    FAST_RESAMPLE = Image.BILINEAR
+
 
 @dataclass(frozen=True)
 class Point:
@@ -30,7 +35,7 @@ def enhance_for_ocr(image: Image.Image) -> Image.Image:
     gray = ImageEnhance.Contrast(gray).enhance(2.2)
     gray = ImageEnhance.Sharpness(gray).enhance(1.6)
     scale = 3
-    resized = gray.resize((gray.width * scale, gray.height * scale))
+    resized = gray.resize((gray.width * scale, gray.height * scale), resample=FAST_RESAMPLE)
     return resized.filter(ImageFilter.SHARPEN)
 
 

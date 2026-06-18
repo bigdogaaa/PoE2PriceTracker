@@ -1,0 +1,20 @@
+[Unit]
+Description=PoE2 Price Share Service
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=tcd
+WorkingDirectory=/opt/poe2-price-share
+UMask=077
+Environment=POE2_PRICE_SHARE_PORT=8787
+Environment=UPSTASH_REDIS_REST_URL=replace-me
+Environment=UPSTASH_REDIS_REST_TOKEN=replace-me
+Environment=UPSTASH_REDIS_REST_READ_TOKEN=replace-me
+ExecStart=/usr/bin/python3 /opt/poe2-price-share/price_share_service.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

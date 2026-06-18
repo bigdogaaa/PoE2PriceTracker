@@ -27,6 +27,7 @@ class HotkeyConfig:
     capture_price: str = "F2"
     focus_search: str = "Ctrl+Space"
     quick_price: str = "F4"
+    realtime_import: str = "F6"
 
 
 @dataclass
@@ -48,10 +49,12 @@ class AppConfig:
     ocr_performance_configured: bool = False
     screenshot_retention_count: int = 20
     show_ocr_review_details: bool = True
+    realtime_min_upvotes: int = 0
+    price_share_service_url: str = "http://123.56.176.147:8787"
     minimize_action: str = "ask"
     close_action: str = "ask"
     visible_columns: list[str] = field(
-        default_factory=lambda: ["序号", "图标", "物品", "价格", "单位", "走势", "记录", "来源", "更新时间", "收藏"]
+        default_factory=lambda: ["序号", "图标", "物品", "价格", "单位", "走势", "记录", "来源", "评价", "更新时间", "收藏"]
     )
     update_manifest: str = UPDATE_MANIFEST_URL
     hotkeys: HotkeyConfig = field(default_factory=HotkeyConfig)
@@ -79,6 +82,17 @@ def _merge_dataclass(cls: type, data: dict[str, Any]):
     return cls(**filtered)
 
 
+def normalize_price_share_service_url(value: str, default: str) -> str:
+    url = str(value or "").strip()
+    if not url:
+        url = default
+    elif "://" not in url:
+        url = "http://" + url
+    if "127.0.0.1" in url or "localhost" in url.lower():
+        url = default
+    return url
+
+
 def load_config() -> AppConfig:
     config = AppConfig()
     path = config.config_path
@@ -87,7 +101,7 @@ def load_config() -> AppConfig:
         save_config(config)
         return config
 
-    with path.open("r", encoding="utf-8") as fh:
+    with path.open("r", encoding="utf-8-sig") as fh:
         raw = json.load(fh)
 
     hotkeys = raw.get("hotkeys", {})
@@ -114,6 +128,10 @@ def load_config() -> AppConfig:
     except (TypeError, ValueError):
         loaded.screenshot_retention_count = 20
     try:
+        loaded.realtime_min_upvotes = max(0, min(999999, int(loaded.realtime_min_upvotes or 0)))
+    except (TypeError, ValueError):
+        loaded.realtime_min_upvotes = 0
+    try:
         loaded.ocr_cpu_threads = max(0, min(64, int(loaded.ocr_cpu_threads or 0)))
     except (TypeError, ValueError):
         loaded.ocr_cpu_threads = 0
@@ -127,8 +145,18 @@ def load_config() -> AppConfig:
         except ValueError:
             index = 1
         loaded.visible_columns.insert(index, "图标")
+    if "评价" not in loaded.visible_columns:
+        try:
+            index = loaded.visible_columns.index("更新时间")
+        except ValueError:
+            index = len(loaded.visible_columns)
+        loaded.visible_columns.insert(index, "评价")
     if loaded.ocr_engine != "rapidocr":
         loaded.ocr_engine = "rapidocr"
+    loaded.price_share_service_url = normalize_price_share_service_url(
+        getattr(loaded, "price_share_service_url", ""),
+        config.price_share_service_url,
+    )
     if (
         not loaded.update_manifest.strip()
         or LEGACY_SOURCE_REPO_DOWNLOAD_BASE in loaded.update_manifest

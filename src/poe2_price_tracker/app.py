@@ -9,6 +9,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
@@ -59,11 +61,22 @@ from . import __version__
 from .config import AppConfig, load_config, save_config
 from .currencies import BASE_CURRENCIES
 from .clipboard_parser import parse_poe_clipboard_item
-from .db import MarketRow, PriceDatabase, PriceStats, convert_amount, normalize_name, trend_percent
+from .db import (
+    MarketRow,
+    PriceDatabase,
+    PriceStats,
+    convert_amount,
+    display_amount_for_item,
+    normalize_name,
+    trend_percent,
+)
 from .hotkeys import GlobalHotkeys, parse_hotkey
+from .market_exchange import ParsedMarketExchange, ParsedRealtimePrice, derive_realtime_price, parse_market_exchange
 from .ocr import RapidOcr
 from .parser import ParsedItemPrice, ParsedPrice, find_number, meaningful_lines, parse_item_price_rows, parse_ocr_text
 from .poe2db_sync import fetch_all_economy_prices
+from .realtime_sync import RealtimeSyncClient, RemoteRealtimePrice
+from .secure_config import RedisCredentials, load_redis_credentials
 from .screenshot import (
     capture_around_cursor,
     capture_full_screen,
@@ -71,6 +84,7 @@ from .screenshot import (
     crop_and_prepare_for_ocr,
     crop_image,
     prepare_image_for_ocr,
+    save_image,
 )
 from .structure import RecognizedItemCandidate, recognize_item_candidates, recognize_structured_prices
 from .updater import UpdateInfo, check_update, download_update
@@ -227,6 +241,7 @@ class SettingsDialog:
         self.lookup_hotkey_var = StringVar(value=config.hotkeys.lookup_hovered)
         self.focus_hotkey_var = StringVar(value=config.hotkeys.focus_search)
         self.quick_hotkey_var = StringVar(value=config.hotkeys.quick_price)
+        self.realtime_hotkey_var = StringVar(value=config.hotkeys.realtime_import)
 
         body = Frame(self.window, padx=18, pady=16)
         body.pack(fill=BOTH, expand=True)
@@ -240,6 +255,7 @@ class SettingsDialog:
             ("截图识别", self.lookup_hotkey_var),
             ("聚焦搜索框", self.focus_hotkey_var),
             ("快速查价", self.quick_hotkey_var),
+            ("实时价格导入", self.realtime_hotkey_var),
         ]:
             row = Frame(body)
             row.pack(fill=X, pady=(8, 0))
@@ -267,6 +283,7 @@ class SettingsDialog:
             self.lookup_hotkey_var.get().strip(),
             self.focus_hotkey_var.get().strip(),
             self.quick_hotkey_var.get().strip(),
+            self.realtime_hotkey_var.get().strip(),
         ]
         try:
             for hotkey in hotkeys:
@@ -280,6 +297,7 @@ class SettingsDialog:
         self.config.hotkeys.lookup_hovered = hotkeys[0]
         self.config.hotkeys.focus_search = hotkeys[1]
         self.config.hotkeys.quick_price = hotkeys[2]
+        self.config.hotkeys.realtime_import = hotkeys[3]
         self.config.update_manifest = self.manifest_var.get().strip()
         save_config(self.config)
         self.window.destroy()
@@ -793,6 +811,14 @@ class PriceTrackerApp:
         self.progress_var = StringVar(value="就绪")
         self.tray_icon = None
         self.syncing = False
+        self.realtime_syncing = False
+        self.realtime_sync_client = RealtimeSyncClient.from_config(
+            self.config.data_path,
+            self.config.price_share_service_url,
+        )
+        self.realtime_sync_free_uses = 1
+        self.realtime_sync_credit_score = 0.0
+        self.realtime_sync_credit_prices: dict[str, float] = {}
         self.updating = False
         self.page_var = StringVar(value="1")
         self.page_size_var = StringVar(value=str(self.config.page_size))
@@ -801,8 +827,12 @@ class PriceTrackerApp:
         self.sort_descending = True
         self.source_filter_var = StringVar(value="全部来源")
         self.trend_widgets = []
+        self.rating_widgets = []
         self.trend_data = {}
+        self.market_row_data: dict[str, MarketRow] = {}
         self.market_icon_images = {}
+        self.rating_icon_images = {}
+        self.realtime_session_votes: dict[int, int] = {}
         self.search_debounce_job = None
         self.trend_render_job = None
         self._ignore_unmap_prompt = False
@@ -812,6 +842,8 @@ class PriceTrackerApp:
         self.quick_price_overlay_labels = {}
         self.quick_price_overlay_hide_job = None
         self.quick_price_overlay_watch_token = 0
+        self.realtime_import_overlay = None
+        self.realtime_import_labels = {}
         self.focus_search_overlay = None
         self.focus_search_entry = None
         self.focus_search_results = None
@@ -838,6 +870,7 @@ class PriceTrackerApp:
         self.screenshot_lookup_drag_moved = False
         self._restore_after_area_capture = False
         self._area_capture_active = False
+        self._market_exchange_restore_window = False
         self.ocr_review_rows: list[ParsedItemPrice] = []
         self.ocr_review_raw_text = ""
         self.ocr_review_image_path = Path()
@@ -851,6 +884,18 @@ class PriceTrackerApp:
         self.ocr_animation_job = None
         self.ocr_animation_step = 0
         self.ocr_capture_photo = None
+        self.market_exchange_parsed = ParsedMarketExchange()
+        self.realtime_price_parsed = ParsedRealtimePrice()
+        self.market_exchange_raw_text = ""
+        self.market_exchange_image_path = Path()
+        self.market_exchange_photo = None
+        self.market_exchange_running = False
+        self.realtime_import_confirmed = False
+        self.realtime_item_var = StringVar()
+        self.realtime_side_var = StringVar(value="买入")
+        self.realtime_amount_var = StringVar()
+        self.realtime_currency_var = StringVar(value="崇高石")
+        self.realtime_confidence_var = StringVar()
         self.preload_ocr_var = StringVar(value="1" if self.config.preload_ocr_on_start else "0")
         self.ocr_cpu_threads_var = StringVar(value=self._ocr_threads_display_value(self.config.ocr_cpu_threads))
         self.ocr_provider_var = StringVar(value=self._ocr_provider_label(self.config.ocr_execution_provider))
@@ -873,6 +918,17 @@ class PriceTrackerApp:
         self.root.protocol("WM_DELETE_WINDOW", self.on_close_request)
         self.root.bind("<Unmap>", self.on_window_unmap, add="+")
         self.root.after(300, self._ensure_tray_icon)
+        self.root.after(450, self._focus_main_window_once)
+
+    def _focus_main_window_once(self) -> None:
+        try:
+            self.root.deiconify()
+            self.root.lift()
+            self.root.focus_force()
+            self.root.attributes("-topmost", True)
+            self.root.after(250, lambda: self.root.attributes("-topmost", False))
+        except Exception:
+            pass
 
     def _configure_style(self) -> None:
         style = ttk.Style()
@@ -889,7 +945,58 @@ class PriceTrackerApp:
         style.configure("TNotebook.Tab", padding=(16, 8))
 
     def _build_menu(self) -> None:
-        self.root.config(menu=Menu(self.root))
+        menu = Menu(self.root)
+        share_menu = Menu(menu, tearoff=0)
+        share_menu.add_command(label="价格共享用户协议", command=self.show_price_share_agreement)
+        menu.add_cascade(label="价格共享", menu=share_menu)
+        self.root.config(menu=menu)
+
+    def show_price_share_agreement(self) -> None:
+        window = Toplevel(self.root)
+        window.title("价格共享用户协议")
+        window.geometry("720x620")
+        window.transient(self.root)
+        window.grab_set()
+        body = Frame(window, padx=18, pady=16)
+        body.pack(fill=BOTH, expand=True)
+        Label(
+            body,
+            text="价格共享用户协议",
+            font=("Microsoft YaHei UI", self.config.font_size + 5, "bold"),
+        ).pack(anchor="w")
+        summary = (
+            "简明规则：实时价格导入会共享物品名、价格、单位、买入/卖出方向和时间，不上传截图。"
+            "每次启动默认可同步一次；贡献积分满 5 分可额外同步一次；同一物品价格变化达到 5% 才计入变化贡献。"
+        )
+        Label(body, text=summary, foreground="#40566f", wraplength=660, justify=LEFT).pack(anchor="w", pady=(10, 12))
+        text = Text(body, wrap="word", height=22)
+        text.pack(fill=BOTH, expand=True)
+        agreement = """一、共享内容
+本功能仅用于共享 Path of Exile 2 物价参考信息。提交实时价格时，软件会上传物品名称、价格、单位、买入或卖出方向、记录时间、必要的解析字段和点赞数，不上传截图文件，不上传游戏账号信息。
+
+二、数据性质
+共享价格来自用户截图识别和人工确认，可能存在识别错误、录入错误或市场波动。共享数据仅供参考，不构成交易承诺或收益保证。
+
+三、贡献积分
+首次录入某个物品计 1 分；同一物品相对上次录入价格变化达到 5% 及以上计 0.5 分；同一物品小幅重复录入不计分。贡献积分满 5 分可获得一次额外同步机会。每次启动默认有一次同步机会，距离上次同步超过 30 分钟也可再次同步。
+
+四、使用限制
+请不要故意提交虚假价格、无关内容、恶意重复数据或干扰服务的请求。软件和服务端可能对提交、点赞和同步频率进行限制。
+
+五、点赞机制
+点赞用于帮助过滤更可信的实时价格。每次软件启动期间，同一条记录最多点赞一次。点赞结果会同步到共享服务，用于本地查询筛选。
+
+六、本地优先
+软件查询优先使用本地数据库。共享服务只在提交、点赞或手动同步实时价格时访问，以减少网络请求和服务成本。
+
+七、服务调整
+价格共享服务、积分规则、同步频率和过滤规则可能根据实际使用情况调整。调整会尽量保持对普通用户友好，并优先保护服务稳定性。
+
+八、继续使用
+使用价格共享功能即表示你理解并接受以上规则。不同意时，可以不使用实时价格共享和同步功能。"""
+        text.insert("1.0", agreement)
+        text.configure(state="disabled")
+        Button(body, text="我知道了", command=window.destroy).pack(anchor="e", pady=(12, 0))
 
     def _build_ui(self) -> None:
         self.sort_var = StringVar(value="最近更新")
@@ -897,11 +1004,15 @@ class PriceTrackerApp:
         self.settings_width_var = StringVar(value=str(self.config.screenshot_width))
         self.settings_height_var = StringVar(value=str(self.config.screenshot_height))
         self.screenshot_retention_var = StringVar(value=str(self.config.screenshot_retention_count))
+        self.realtime_min_upvotes_var = StringVar(value=str(self.config.realtime_min_upvotes))
         self.show_ocr_details_var = StringVar(value="1" if self.config.show_ocr_review_details else "0")
         self.settings_manifest_var = StringVar(value=self.config.update_manifest)
         self.focus_search_shape_var = StringVar(value="圆角" if self.config.focus_search_rounded else "直角")
         self.focus_search_limit_var = StringVar(value=str(self.config.focus_search_limit))
         self.ocr_status_var = StringVar(value="截图识别已内置")
+        redis_credentials = load_redis_credentials(self.config.data_path)
+        self.share_service_url_var = StringVar(value=self.config.price_share_service_url)
+        self.redis_sync_status_var = StringVar(value=self._share_sync_status_text(redis_credentials))
         self.manual_item_var = StringVar()
         self.manual_amount_var = StringVar()
         self.manual_currency_var = StringVar(value="崇高石")
@@ -927,6 +1038,7 @@ class PriceTrackerApp:
         Frame(self.sidebar).pack(fill=BOTH, expand=True)
         self._nav_button("配置", self.show_settings_page).pack(side="bottom", fill=X, pady=4)
         self._nav_button("同步经济数据", self.sync_poe2db_currency).pack(side="bottom", fill=X, pady=4)
+        self._nav_button("同步实时价格", self.sync_realtime_prices).pack(side="bottom", fill=X, pady=4)
         self._nav_button("手动记录", self.show_manual_record_page).pack(side="bottom", fill=X, pady=4)
         self._nav_button("截图识别", self.show_ocr_review_page).pack(side="bottom", fill=X, pady=4)
 
@@ -1047,6 +1159,13 @@ class PriceTrackerApp:
         providers = RapidOcr.available_providers()
         return "，".join(providers) if providers else "未检测到 onnxruntime"
 
+    @staticmethod
+    def _ocr_provider_status_text() -> str:
+        providers = set(RapidOcr.available_providers())
+        cuda_status = "可用" if "CUDAExecutionProvider" in providers else "不可用"
+        directml_status = "可用" if "DmlExecutionProvider" in providers else "不可用"
+        return f"CUDA：{cuda_status}；DirectML：{directml_status}"
+
     def _set_ocr_process_priority(self, low: bool) -> int | None:
         try:
             kernel32 = ctypes.windll.kernel32
@@ -1130,7 +1249,7 @@ class PriceTrackerApp:
         Label(row, text="价格", width=10, anchor="w").pack(side=LEFT)
         Entry(row, textvariable=self.manual_amount_var, width=18).pack(side=LEFT)
         Label(row, text="单位").pack(side=LEFT, padx=(18, 8))
-        manual_unit = Combobox(row, textvariable=self.manual_currency_var, values=["崇高石", "神圣石"], width=24)
+        manual_unit = Combobox(row, textvariable=self.manual_currency_var, values=["崇高石", "神圣石", "混沌石"], width=24)
         self._enable_combo_full_click(manual_unit).pack(side=LEFT)
 
         ttk.Checkbutton(
@@ -1156,6 +1275,237 @@ class PriceTrackerApp:
         self.manual_item_var.set("")
         self.manual_amount_var.set("")
         self.manual_currency_var.set("崇高石")
+
+    def show_market_exchange_page(self) -> None:
+        self.current_page_name = "market_exchange"
+        self._clear_content()
+        header = Frame(self.content)
+        header.pack(fill=X)
+        Label(
+            header,
+            text="实时价格导入",
+            font=("Microsoft YaHei UI", self.config.font_size + 8, "bold"),
+        ).pack(side=LEFT, anchor="w")
+        Button(header, text="提交", command=self.save_market_exchange_record).pack(side=RIGHT)
+
+        Label(
+            self.content,
+            text=f"按 {self.config.hotkeys.realtime_import} 框选游戏内置市场，自动整理为一条买入或卖出价格。",
+            foreground="#607080",
+            wraplength=900,
+        ).pack(anchor="w", pady=(8, 0))
+
+        result_box = LabelFrame(self.content, text="解析出的价格", padx=14, pady=12)
+        result_box.pack(fill=X, pady=(14, 0))
+        result_box.columnconfigure(1, weight=2)
+        result_box.columnconfigure(3, weight=1)
+        result_box.columnconfigure(5, weight=1)
+
+        Label(result_box, text="物品").grid(row=0, column=0, sticky="w", padx=(0, 8), pady=4)
+        Entry(result_box, textvariable=self.realtime_item_var, font=("Microsoft YaHei UI", self.config.font_size + 1)).grid(
+            row=0, column=1, sticky="ew", padx=(0, 16), pady=4
+        )
+        Label(result_box, text="类型").grid(row=0, column=2, sticky="w", padx=(0, 8), pady=4)
+        side = Combobox(result_box, textvariable=self.realtime_side_var, values=["买入", "卖出"], state="readonly", width=8)
+        self._enable_combo_full_click(side).grid(row=0, column=3, sticky="ew", padx=(0, 16), pady=4)
+        Label(result_box, text="价格").grid(row=0, column=4, sticky="w", padx=(0, 8), pady=4)
+        Entry(result_box, textvariable=self.realtime_amount_var, font=("Microsoft YaHei UI", self.config.font_size + 1)).grid(
+            row=0, column=5, sticky="ew", padx=(0, 16), pady=4
+        )
+        Label(result_box, text="单位").grid(row=0, column=6, sticky="w", padx=(0, 8), pady=4)
+        unit = Combobox(result_box, textvariable=self.realtime_currency_var, values=["神圣石", "崇高石", "混沌石"], state="readonly", width=10)
+        self._enable_combo_full_click(unit).grid(row=0, column=7, sticky="ew", pady=4)
+
+        Entry(result_box, textvariable=self.realtime_confidence_var, state="readonly").grid(
+            row=1, column=0, columnspan=8, sticky="ew", pady=(8, 0)
+        )
+
+        process_box = Frame(self.content)
+        process_box.pack(fill=BOTH, expand=True, pady=(14, 0))
+        process_box.columnconfigure(0, weight=3)
+        process_box.columnconfigure(1, weight=2)
+        process_box.rowconfigure(0, weight=1)
+        preview = LabelFrame(process_box, text="截图", padx=10, pady=10)
+        preview.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
+        self.market_exchange_canvas = Canvas(preview, highlightthickness=1, highlightbackground="#d9e2ec", bg="#f8fafc")
+        exchange_x_scroll = ttk.Scrollbar(preview, orient="horizontal", command=self.market_exchange_canvas.xview)
+        exchange_y_scroll = ttk.Scrollbar(preview, orient="vertical", command=self.market_exchange_canvas.yview)
+        self.market_exchange_canvas.configure(xscrollcommand=exchange_x_scroll.set, yscrollcommand=exchange_y_scroll.set)
+        self.market_exchange_canvas.grid(row=0, column=0, sticky="nsew")
+        exchange_y_scroll.grid(row=0, column=1, sticky="ns")
+        exchange_x_scroll.grid(row=1, column=0, sticky="ew")
+        preview.columnconfigure(0, weight=1)
+        preview.rowconfigure(0, weight=1)
+
+        text_panel = LabelFrame(process_box, text="识别到的文字", padx=10, pady=10)
+        text_panel.grid(row=0, column=1, sticky="nsew")
+        self.market_exchange_raw_text_widget = Text(text_panel, height=10, wrap="word")
+        self.market_exchange_raw_text_widget.pack(fill=BOTH, expand=True)
+        self._render_market_exchange_image()
+        self._update_market_exchange_text()
+
+    def _render_market_exchange_image(self) -> None:
+        canvas = getattr(self, "market_exchange_canvas", None)
+        if canvas is None:
+            return
+        canvas.delete("all")
+        if not self.market_exchange_image_path or not self.market_exchange_image_path.is_file():
+            canvas.create_text(
+                24,
+                24,
+                text=f"还没有截图。按 {self.config.hotkeys.realtime_import} 开始框选市场区域。",
+                anchor="nw",
+                fill="#607080",
+            )
+            canvas.configure(scrollregion=(0, 0, 680, 220))
+            return
+        try:
+            image = Image.open(self.market_exchange_image_path)
+            self.market_exchange_photo = ImageTk.PhotoImage(image)
+            canvas.create_image(0, 0, image=self.market_exchange_photo, anchor="nw")
+            canvas.configure(scrollregion=(0, 0, image.width, image.height))
+        except Exception as exc:
+            canvas.create_text(24, 24, text=f"截图预览失败：{exc}", anchor="nw", fill="#b42318")
+            canvas.configure(scrollregion=(0, 0, 680, 220))
+
+    def _update_market_exchange_text(self) -> None:
+        text = getattr(self, "market_exchange_raw_text_widget", None)
+        if text is None:
+            return
+        text.delete("1.0", END)
+        if self.market_exchange_running:
+            text.insert("1.0", "正在识别实时价格...")
+        elif self.market_exchange_raw_text:
+            text.insert("1.0", self.market_exchange_raw_text)
+        else:
+            text.insert("1.0", "等待截图。")
+
+    def _fill_market_exchange_fields(self, parsed: ParsedMarketExchange) -> None:
+        self.market_exchange_parsed = parsed
+        self.realtime_price_parsed = derive_realtime_price(parsed, self.db)
+        realtime = self.realtime_price_parsed
+        self.realtime_item_var.set(realtime.item_match or realtime.item_name)
+        self.realtime_side_var.set(realtime.side or "买入")
+        self.realtime_amount_var.set(f"{realtime.amount:g}" if realtime.amount else "")
+        self.realtime_currency_var.set(realtime.currency or "崇高石")
+        self.realtime_confidence_var.set(self._market_exchange_check_text(parsed, realtime))
+
+    def _market_exchange_check_text(self, parsed: ParsedMarketExchange, realtime: ParsedRealtimePrice) -> str:
+        if realtime.item_name and realtime.amount and realtime.currency:
+            return f"已解析为{realtime.side}价，请核对后提交。"
+        return "请修订物品、价格和单位。"
+
+    def _market_exchange_name_flags(self, item_name: str) -> tuple[str, bool, bool]:
+        normalized = normalize_name(item_name)
+        currency_names = set(BASE_CURRENCIES)
+        try:
+            currency_names.update(asset.name for asset in self.db.get_icon_assets("currency") if asset.name)
+        except Exception:
+            pass
+        currency_names.update({"崇高石", "神圣石", "混沌石", "富豪石", "点金石", "剥离石"})
+        for currency in currency_names:
+            if normalize_name(currency) == normalized:
+                return currency, True, True
+        if not normalized:
+            return "", False, False
+        try:
+            matched, score = self.db.match_item_name_strict(item_name)
+            if score >= 0.94:
+                return matched, True, False
+        except Exception:
+            pass
+        return item_name.strip(), False, False
+
+    def save_market_exchange_record(self, show_message: bool = True) -> None:
+        if not self.realtime_import_confirmed:
+            messagebox.showwarning("请先确认", "请先点击“待确认”，确认识别结果后再提交。")
+            return
+        item_name = self.realtime_item_var.get().strip()
+        side = self.realtime_side_var.get().strip() or "买入"
+        currency = self.realtime_currency_var.get().strip() or "崇高石"
+        if not item_name:
+            messagebox.showwarning("缺少物品", "请确认要记录价格的物品。")
+            return
+        try:
+            amount = float(self.realtime_amount_var.get().strip().replace(",", "."))
+        except ValueError:
+            messagebox.showwarning("价格格式错误", "价格需要填写数字。")
+            return
+        if amount <= 0:
+            messagebox.showwarning("价格格式错误", "价格必须大于 0。")
+            return
+        item_match, item_known, _is_currency = self._market_exchange_name_flags(item_name)
+        parsed = self.market_exchange_parsed
+        realtime = self.realtime_price_parsed
+        record_id = self.db.add_realtime_price_record(
+            item_name=item_name,
+            side=side,
+            amount=amount,
+            currency=currency,
+            want_item=parsed.want_item_match or parsed.want_item,
+            have_item=parsed.have_item_match or parsed.have_item,
+            market_want_amount=parsed.market_want_amount,
+            market_have_amount=parsed.market_have_amount,
+            user_want_amount=parsed.user_want_amount,
+            user_have_amount=parsed.user_have_amount,
+            item_match=item_match if item_known else realtime.item_match,
+            item_known=item_known or realtime.item_known,
+            source="实时价格导入",
+            confidence=parsed.confidence,
+            raw_text=self.market_exchange_raw_text,
+            screenshot_path=str(self.market_exchange_image_path),
+        )
+        self._record_realtime_submission_credit(item_name, amount, currency)
+        self._submit_realtime_record_to_remote(record_id)
+        self.refresh_market_table()
+        self.status_var.set(f"已记录{side}价：{item_name} {amount:g} {currency}。")
+        if show_message:
+            messagebox.showinfo("保存完成", "实时价格已保存。")
+        self.destroy_realtime_import_overlay()
+
+    def _submit_realtime_record_to_remote(self, record_id: int) -> None:
+        record = self.db.get_realtime_price_record(record_id)
+        if record is None:
+            return
+        self.realtime_sync_client = RealtimeSyncClient.from_config(
+            self.config.data_path,
+            self.config.price_share_service_url,
+        )
+        if not self.realtime_sync_client.can_write():
+            return
+        threading.Thread(
+            target=self._submit_realtime_record_worker,
+            args=(record,),
+            daemon=True,
+        ).start()
+
+    def _submit_realtime_record_worker(self, record) -> None:
+        try:
+            self.realtime_sync_client.submit_record(record)
+        except Exception as exc:
+            self._post_event(("realtime_submit_error", str(exc)))
+
+    def _submit_realtime_upvote_to_remote(self, record_id: int) -> None:
+        record = self.db.get_realtime_price_record(record_id)
+        if record is None or not record.remote_key:
+            return
+        self.realtime_sync_client = RealtimeSyncClient.from_config(
+            self.config.data_path,
+            self.config.price_share_service_url,
+        )
+        if not self.realtime_sync_client.can_write():
+            return
+        threading.Thread(
+            target=self._submit_realtime_upvote_worker,
+            args=(record.remote_key,),
+            daemon=True,
+        ).start()
+
+    def _submit_realtime_upvote_worker(self, remote_key: str) -> None:
+        try:
+            self.realtime_sync_client.increment_upvote(remote_key)
+        except Exception as exc:
+            self._post_event(("realtime_submit_error", str(exc)))
 
     def show_ocr_review_page(self) -> None:
         self.current_page_name = "ocr"
@@ -1221,7 +1571,7 @@ class PriceTrackerApp:
         ocr_unit = Combobox(
             edit_row,
             textvariable=self.ocr_currency_var,
-            values=["崇高石", "神圣石"],
+            values=["崇高石", "神圣石", "混沌石"],
             width=18,
         )
         self._enable_combo_full_click(ocr_unit).pack(side=LEFT, padx=(8, 14))
@@ -1483,7 +1833,7 @@ class PriceTrackerApp:
         currency = Combobox(
             filters,
             textvariable=self.display_currency_var,
-            values=["神圣石", "崇高石"],
+            values=["神圣石", "崇高石", "混沌石"],
             width=8,
             state="readonly",
         )
@@ -1510,7 +1860,7 @@ class PriceTrackerApp:
         font_size.pack(side=LEFT, padx=(8, 0))
         font_size.bind("<<ComboboxSelected>>", lambda _event: self.save_market_font_size())
 
-        columns = ("index", "item", "price", "currency", "trend", "count", "source", "updated", "favorite")
+        columns = ("index", "item", "price", "currency", "trend", "count", "source", "rating", "updated", "favorite")
         table_box = Frame(self.content)
         table_box.pack(fill=BOTH, expand=True)
         self.market_tree = ttk.Treeview(
@@ -1534,6 +1884,7 @@ class PriceTrackerApp:
             "trend": "走势",
             "count": "记录",
             "source": "来源",
+            "rating": "评价",
             "updated": "更新时间",
             "favorite": "收藏",
         }
@@ -1545,6 +1896,7 @@ class PriceTrackerApp:
             "trend": 170,
             "count": 80,
             "source": 150,
+            "rating": 118,
             "updated": 180,
             "favorite": 80,
         }
@@ -1617,6 +1969,7 @@ class PriceTrackerApp:
             ("截图识别", StringVar(value=self.config.hotkeys.lookup_hovered)),
             ("聚焦搜索", StringVar(value=self.config.hotkeys.focus_search)),
             ("快速查价", StringVar(value=self.config.hotkeys.quick_price)),
+            ("实时价格导入", StringVar(value=self.config.hotkeys.realtime_import)),
         ]:
             row = Frame(left)
             row.pack(fill=X, pady=6)
@@ -1629,6 +1982,8 @@ class PriceTrackerApp:
 
         right = LabelFrame(grid, text="显示与截图", padx=14, pady=12)
         right.pack(side=LEFT, fill=BOTH, expand=True, padx=(10, 0))
+        positive_integer_vcmd = (self.root.register(self._validate_positive_integer_input), "%P")
+        nonnegative_integer_vcmd = (self.root.register(self._validate_nonnegative_integer_input), "%P")
         for label, variable in [
             ("默认每页数量", self.page_size_var),
             ("保留截图数量", self.screenshot_retention_var),
@@ -1636,14 +1991,21 @@ class PriceTrackerApp:
             row = Frame(right)
             row.pack(fill=X, pady=6)
             Label(row, text=label, width=14, anchor="w").pack(side=LEFT)
-            entry = Entry(row, textvariable=variable)
+            entry = Entry(row, textvariable=variable, validate="key", validatecommand=positive_integer_vcmd)
             entry.pack(side=LEFT, fill=X, expand=True)
             entry.bind("<FocusOut>", lambda _event: self.save_inline_settings())
             entry.bind("<Return>", lambda _event: self.save_inline_settings())
         row = Frame(right)
         row.pack(fill=X, pady=6)
+        Label(row, text="实时价格最低赞", width=14, anchor="w").pack(side=LEFT)
+        entry = Entry(row, textvariable=self.realtime_min_upvotes_var, validate="key", validatecommand=nonnegative_integer_vcmd)
+        entry.pack(side=LEFT, fill=X, expand=True)
+        entry.bind("<FocusOut>", lambda _event: self.save_inline_settings())
+        entry.bind("<Return>", lambda _event: self.save_inline_settings())
+        row = Frame(right)
+        row.pack(fill=X, pady=6)
         Label(row, text="默认显示单位", width=14, anchor="w").pack(side=LEFT)
-        unit = Combobox(row, textvariable=self.display_currency_var, values=["神圣石", "崇高石"], state="readonly")
+        unit = Combobox(row, textvariable=self.display_currency_var, values=["神圣石", "崇高石", "混沌石"], state="readonly")
         unit.pack(side=LEFT, fill=X, expand=True)
         unit.bind("<<ComboboxSelected>>", lambda _event: self.save_display_currency())
         row = Frame(right)
@@ -1730,6 +2092,12 @@ class PriceTrackerApp:
         threads.bind("<Return>", lambda _event: self.save_ocr_performance_settings())
         Label(
             ocr_box,
+            text=self._ocr_provider_status_text(),
+            foreground="#40566f",
+            wraplength=760,
+        ).pack(anchor="w", pady=(2, 0))
+        Label(
+            ocr_box,
             text=f"检测到 {os.cpu_count() or 1} 个逻辑核心",
             foreground="#607080",
             wraplength=760,
@@ -1758,6 +2126,24 @@ class PriceTrackerApp:
             offvalue="0",
             command=self.save_ocr_details_setting,
         ).pack(anchor="w", pady=(8, 0))
+
+        realtime_sync_box = LabelFrame(body, text="实时价格同步", padx=14, pady=12)
+        realtime_sync_box.pack(fill=X, pady=(16, 0))
+        Label(
+            realtime_sync_box,
+            text="普通用户只连接价格共享服务，Redis 密钥只保存在服务器端。",
+            foreground="#607080",
+            wraplength=760,
+        ).pack(anchor="w")
+        row = Frame(realtime_sync_box)
+        row.pack(fill=X, pady=(10, 0))
+        Label(row, text="共享服务地址", width=14, anchor="w").pack(side=LEFT)
+        Entry(row, textvariable=self.share_service_url_var).pack(side=LEFT, fill=X, expand=True)
+        row = Frame(realtime_sync_box)
+        row.pack(fill=X, pady=(8, 0))
+        Label(row, textvariable=self.redis_sync_status_var, foreground="#40566f").pack(side=LEFT, fill=X, expand=True)
+        Button(row, text="保存", command=self.save_realtime_sync_settings).pack(side=RIGHT)
+        Button(row, text="测试连接", command=self.test_price_share_service).pack(side=RIGHT, padx=(0, 8))
 
         danger_box = LabelFrame(body, text="数据", padx=14, pady=12)
         danger_box.pack(fill=X, pady=(16, 0))
@@ -1801,21 +2187,118 @@ class PriceTrackerApp:
             self.config.hotkeys.focus_search = value
         elif label == "快速查价":
             self.config.hotkeys.quick_price = value
+        elif label == "实时价格导入":
+            self.config.hotkeys.realtime_import = value
         save_config(self.config)
         self.reload_hotkeys()
+
+    @staticmethod
+    def _validate_positive_integer_input(value: str) -> bool:
+        return value == "" or (value.isdecimal() and int(value) > 0)
+
+    @staticmethod
+    def _validate_nonnegative_integer_input(value: str) -> bool:
+        return value == "" or (value.isdecimal() and int(value) >= 0)
+
+    @staticmethod
+    def _positive_integer_setting(variable: StringVar, fallback: int, maximum: int = 500) -> int:
+        text = variable.get().strip()
+        try:
+            value = int(text)
+        except ValueError:
+            value = fallback
+        value = max(1, min(maximum, value))
+        variable.set(str(value))
+        return value
+
+    @staticmethod
+    def _nonnegative_integer_setting(variable: StringVar, fallback: int, maximum: int = 999) -> int:
+        text = variable.get().strip()
+        try:
+            value = int(text)
+        except ValueError:
+            value = fallback
+        value = max(0, min(maximum, value))
+        variable.set(str(value))
+        return value
+
+    def _share_sync_status_text(self, credentials: RedisCredentials) -> str:
+        if str(getattr(self.config, "price_share_service_url", "") or "").strip():
+            return "已使用价格共享服务，Redis 密钥不会保存在本机。"
+        if credentials.has_write():
+            return "已配置本机私有同步，可上传并同步实时价格。"
+        if credentials.has_read():
+            return "已配置本机私有读取，只能同步实时价格。"
+        return "未配置实时价格同步服务。"
+
+    @staticmethod
+    def _normalize_service_url(url: str) -> str:
+        cleaned = url.strip().rstrip("/")
+        if cleaned and "://" not in cleaned:
+            cleaned = "http://" + cleaned
+        return cleaned
+
+    def save_realtime_sync_settings(self) -> None:
+        url = self._normalize_service_url(self.share_service_url_var.get())
+        if not url:
+            messagebox.showwarning("缺少服务地址", "请填写价格共享服务地址。")
+            return
+        self.share_service_url_var.set(url)
+        self.config.price_share_service_url = url
+        save_config(self.config)
+        self.realtime_sync_client = RealtimeSyncClient.from_config(self.config.data_path, url)
+        self.redis_sync_status_var.set(self._share_sync_status_text(load_redis_credentials(self.config.data_path)))
+        self.status_var.set("价格共享服务配置已保存。")
+        self.test_price_share_service()
+
+    def test_price_share_service(self) -> None:
+        url = self._normalize_service_url(self.share_service_url_var.get())
+        if not url:
+            self.redis_sync_status_var.set("请先填写共享服务地址。")
+            return
+        self.share_service_url_var.set(url)
+        self.redis_sync_status_var.set("正在检测共享服务连接...")
+        threading.Thread(target=self._price_share_service_check_worker, args=(url,), daemon=True).start()
+
+    def _price_share_service_check_worker(self, url: str) -> None:
+        health_url = url.rstrip("/") + "/health"
+        try:
+            request = urllib.request.Request(
+                health_url,
+                method="GET",
+                headers={"Accept": "application/json", "User-Agent": "PoE2PriceTracker/1"},
+            )
+            opener = urllib.request.build_opener(urllib.request.ProxyHandler({}))
+            with opener.open(request, timeout=8) as response:
+                body = response.read().decode("utf-8", errors="replace")
+                status = int(getattr(response, "status", 200) or 200)
+            ok = status == 200 and '"ok":true' in body.replace(" ", "").lower()
+            message = "连接正常，可以同步实时价格。" if ok else f"连接异常：服务返回 {status}。"
+            self._post_event(("price_share_check_done", ok, message))
+        except Exception as exc:
+            self._post_event(("price_share_check_done", False, f"连接失败：{exc}"))
 
     def save_inline_settings(self) -> None:
         try:
             self.config.screenshot_width = max(120, int(self.settings_width_var.get()))
             self.config.screenshot_height = max(120, int(self.settings_height_var.get()))
-            self.config.page_size = max(10, min(500, int(self.page_size_var.get())))
             self.config.focus_search_limit = max(1, min(10, int(self.focus_search_limit_var.get())))
-            self.config.screenshot_retention_count = max(1, min(500, int(self.screenshot_retention_var.get())))
         except ValueError:
             return
+        self.config.page_size = self._positive_integer_setting(self.page_size_var, self.config.page_size)
+        self.config.screenshot_retention_count = self._positive_integer_setting(
+            self.screenshot_retention_var,
+            self.config.screenshot_retention_count,
+        )
+        self.config.realtime_min_upvotes = self._nonnegative_integer_setting(
+            self.realtime_min_upvotes_var,
+            self.config.realtime_min_upvotes,
+            maximum=999999,
+        )
         self.config.update_manifest = self.settings_manifest_var.get().strip()
         save_config(self.config)
         self._configure_style()
+        self.refresh_market_table()
         self.status_var.set("配置已自动保存。")
 
     def save_focus_search_settings(self) -> None:
@@ -1921,6 +2404,7 @@ class PriceTrackerApp:
         if self._has_market_tree():
             self.refresh_market_table()
         self.status_var.set("已清空本地价格记录。")
+        messagebox.showinfo("清空已记录数据", "已清空成功！")
 
     def save_market_font_size(self) -> None:
         try:
@@ -1943,6 +2427,7 @@ class PriceTrackerApp:
             "updated": "latest_at",
             "count": "count",
             "source": "source",
+            "rating": "rating",
             "favorite": "favorite",
         }.get(key, key)
         if self.sort_column != db_column:
@@ -1968,6 +2453,7 @@ class PriceTrackerApp:
             "updated": "最近更新",
             "count": "记录数",
             "source": "来源",
+            "rating": "评价",
             "favorite": "收藏",
         }
         db_column = {
@@ -1980,6 +2466,7 @@ class PriceTrackerApp:
             "updated": "latest_at",
             "count": "count",
             "source": "source",
+            "rating": "rating",
             "favorite": "favorite",
         }.get(column)
         if not db_column:
@@ -2044,6 +2531,7 @@ class PriceTrackerApp:
             widget.destroy()
         self.trend_widgets.clear()
         self.trend_data.clear()
+        self.market_row_data.clear()
         self.market_icon_images.clear()
         for item in self.market_tree.get_children():
             self.market_tree.delete(item)
@@ -2054,6 +2542,7 @@ class PriceTrackerApp:
             query=self.search_var.get(),
             source_filter=self.source_filter_var.get(),
             favorites_only=getattr(self, "current_favorites_only", False),
+            min_realtime_upvotes=self._realtime_min_upvotes(),
         )
         max_page = max(1, (total + page_size - 1) // page_size)
         if page > max_page:
@@ -2061,23 +2550,43 @@ class PriceTrackerApp:
             self.page_var.set(str(page))
         target_currency = self.display_currency_var.get() or self.config.display_currency
         rate = self.db.get_exalted_per_divine()
-        all_rows = self.db.get_market_rows(
-            query=self.search_var.get(),
-            source_filter=self.source_filter_var.get(),
-            favorites_only=getattr(self, "current_favorites_only", False),
-            sort_by="latest_at",
-            descending=True,
-            offset=0,
-            limit=10000,
-        )
-        all_rows.sort(
-            key=lambda row: self._market_sort_key(row, target_currency, rate),
-            reverse=self.sort_descending,
-        )
-        all_rows.sort(key=lambda row: not row.pinned)
-        rows = all_rows[(page - 1) * page_size : page * page_size]
+        chaos_per_divine = self.db.get_chaos_per_divine()
+        db_sort_columns = {"latest_at", "name", "count", "source", "favorite", "price", "rating", "icon", "trend", "currency"}
+        if self.sort_column in db_sort_columns:
+            rows = self.db.get_market_rows(
+                query=self.search_var.get(),
+                source_filter=self.source_filter_var.get(),
+                favorites_only=getattr(self, "current_favorites_only", False),
+                sort_by=self.sort_column,
+                descending=self.sort_descending,
+                offset=(page - 1) * page_size,
+                limit=page_size,
+                target_currency=target_currency,
+                conversion_rate=rate,
+                chaos_per_divine=chaos_per_divine,
+                min_realtime_upvotes=self._realtime_min_upvotes(),
+            )
+        else:
+            all_rows = self.db.get_market_rows(
+                query=self.search_var.get(),
+                source_filter=self.source_filter_var.get(),
+                favorites_only=getattr(self, "current_favorites_only", False),
+                sort_by="latest_at",
+                descending=True,
+                offset=0,
+                limit=10000,
+                min_realtime_upvotes=self._realtime_min_upvotes(),
+            )
+            all_rows.sort(
+                key=lambda row: self._market_sort_key(row, target_currency, rate, chaos_per_divine),
+                reverse=self.sort_descending,
+            )
+            all_rows.sort(key=lambda row: not row.pinned)
+            rows = all_rows[(page - 1) * page_size : page * page_size]
         for index, row in enumerate(rows, start=(page - 1) * page_size + 1):
-            display_amount = convert_amount(row.latest_amount, row.latest_currency, target_currency, rate)
+            display_amount = display_amount_for_item(
+                row.item_name, row.latest_amount, row.latest_currency, target_currency, rate, chaos_per_divine
+            )
             icon_image = self._market_icon_image(row.item_icon_path, row.item_name)
             self.market_tree.insert(
                 "",
@@ -2093,17 +2602,24 @@ class PriceTrackerApp:
                     row.trend_percent,
                     row.count,
                     row.source,
+                    "",
                     self._format_time(row.latest_at),
                     ("置 " if row.pinned else "") + ("★" if row.favorite else "☆"),
                 ),
                 tags=("pinned",) if row.pinned else (),
             )
             history = [
-                convert_amount(record.amount, record.currency, row.latest_currency, rate)
-                for record in self.db.get_price_history(row.item_name, limit=12)
+                convert_amount(record.amount, record.currency, row.latest_currency, rate, chaos_per_divine)
+                for record in self.db.get_price_history(
+                    row.item_name,
+                    limit=12,
+                    min_realtime_upvotes=self._realtime_min_upvotes(),
+                    prefer_realtime_if_available=True,
+                )
             ]
             trend_values = history if len(history) >= 3 else []
             self.trend_data[row.item_name] = (trend_values, row.trend_percent)
+            self.market_row_data[row.item_name] = row
         self._apply_visible_columns()
         self._update_market_headings()
         self.root.update_idletasks()
@@ -2126,6 +2642,122 @@ class PriceTrackerApp:
         except Exception:
             return ""
 
+    @staticmethod
+    def _static_asset_path(name: str) -> Path:
+        base = Path(getattr(sys, "_MEIPASS", Path(__file__).resolve().parents[2]))
+        bundled = base / "static" / name
+        if bundled.exists():
+            return bundled
+        return Path(__file__).resolve().parents[2] / "static" / name
+
+    def _rating_icon_image(self, name: str, size: int = 22, disabled: bool = False, light: bool = False):
+        key = f"{name}:{size}:{disabled}:{light}"
+        if key in self.rating_icon_images:
+            return self.rating_icon_images[key]
+        path = self._static_asset_path(name)
+        if not path.exists():
+            return ""
+        try:
+            image = Image.open(path).convert("RGBA")
+            image.thumbnail((size, size), Image.LANCZOS)
+            if light:
+                alpha = image.getchannel("A")
+                tint = Image.new("RGBA", image.size, (248, 250, 252, 255))
+                tint.putalpha(alpha)
+                image = tint
+            if disabled:
+                alpha = image.getchannel("A").point(lambda value: int(value * 0.42))
+                image.putalpha(alpha)
+            photo = ImageTk.PhotoImage(image)
+            self.rating_icon_images[key] = photo
+            return photo
+        except Exception:
+            return ""
+
+    @staticmethod
+    def _is_realtime_rating_source(source: str) -> bool:
+        value = str(source or "").strip().casefold()
+        return (
+            value.startswith("实时价格导入")
+            or value.startswith("realtime-import")
+            or value.startswith("realtime import")
+            or value.startswith("瀹炴椂浠锋牸瀵煎叆")
+        )
+
+    def _rating_available(self, record_id: int, source: str) -> bool:
+        return record_id > 0
+
+    @staticmethod
+    def _format_upvotes(upvotes: int) -> str:
+        try:
+            value = max(0, int(upvotes or 0))
+        except (TypeError, ValueError):
+            value = 0
+        return f"{value:,}"
+
+    def _rating_button(self, parent, record_id: int, bg: str, size: int = 22, upvotes: int = 0):
+        icon_name = "rating.png"
+        voted = record_id in self.realtime_session_votes
+        selected = self.realtime_session_votes.get(record_id) == 1
+        light = bg.lower() in {"#10151d", "#000000"}
+        image = self._rating_icon_image(icon_name, size=size, disabled=voted and not selected, light=light)
+        vote_text = self._format_upvotes(upvotes)
+        label = Label(
+            parent,
+            image=image,
+            text=f" {max(0, int(upvotes or 0))}" if image else f"赞 {max(0, int(upvotes or 0))}",
+            compound=LEFT,
+            fg="#dbeafe" if light else "#2563eb",
+            bg="#e8fff1" if selected else bg,
+            relief="solid" if selected else "flat",
+            bd=1 if selected else 0,
+            padx=5,
+            pady=2,
+            cursor="" if voted else "hand2",
+            font=("Microsoft YaHei UI", max(9, int(size * 0.55)), "bold"),
+        )
+        label.configure(text=f" {vote_text}" if image else f"赞{vote_text}")
+        label._rating_button = True  # type: ignore[attr-defined]
+        if not voted:
+            label.bind("<Button-1>", lambda event, rid=record_id: self._vote_realtime_record(event, rid))
+        return label
+
+    def _render_rating_controls(
+        self,
+        parent,
+        record_id: int,
+        source: str,
+        bg: str,
+        size: int = 22,
+        upvotes: int = 0,
+    ) -> bool:
+        if not self._rating_available(record_id, source):
+            return False
+        holder = Frame(parent, bg=bg)
+        holder.pack(side=RIGHT, padx=(10, 0))
+        self._rating_button(holder, record_id, bg, size=size, upvotes=upvotes).pack(side=LEFT)
+        return True
+
+    def _vote_realtime_record(self, event, record_id: int) -> str:
+        if record_id <= 0 or record_id in self.realtime_session_votes:
+            return "break"
+        self.realtime_session_votes[record_id] = 1
+        upvotes, _downvotes = self.db.vote_realtime_price_record(record_id, 1)
+        try:
+            parent = event.widget.master
+            bg = str(parent["bg"])
+            for child in parent.winfo_children():
+                child.destroy()
+            self._rating_button(parent, record_id, bg, size=20, upvotes=upvotes).pack(side=LEFT)
+        except Exception:
+            pass
+        self.status_var.set("已点赞。")
+        self._submit_realtime_upvote_to_remote(record_id)
+        self.refresh_market_table()
+        if self._focus_search_overlay_exists():
+            self.refresh_focus_search_results()
+        return "break"
+
     def _settle_market_layout(self) -> None:
         if not self._has_market_tree():
             return
@@ -2134,7 +2766,7 @@ class PriceTrackerApp:
         self._auto_fit_market_columns()
         self._schedule_trend_render(180)
 
-    def _market_sort_key(self, row, target_currency: str, rate: float):
+    def _market_sort_key(self, row, target_currency: str, rate: float, chaos_per_divine: float = 0):
         column = self.sort_column
         if column == "index":
             return row.item_id
@@ -2143,7 +2775,9 @@ class PriceTrackerApp:
         if column == "name":
             return row.item_name.casefold()
         if column == "price":
-            return convert_amount(row.latest_amount, row.latest_currency, target_currency, rate)
+            return display_amount_for_item(
+                row.item_name, row.latest_amount, row.latest_currency, target_currency, rate, chaos_per_divine
+            )
         if column == "currency":
             return str(target_currency).casefold()
         if column == "trend":
@@ -2152,6 +2786,8 @@ class PriceTrackerApp:
             return row.count
         if column == "source":
             return row.source.casefold()
+        if column == "rating":
+            return row.realtime_upvotes
         if column == "latest_at":
             return row.latest_at
         if column == "favorite":
@@ -2189,12 +2825,13 @@ class PriceTrackerApp:
             self.source_filter_var.set("全部来源")
 
     def _clear_trend_canvases(self) -> None:
-        for widget in self.trend_widgets:
+        for widget in self.trend_widgets + self.rating_widgets:
             try:
                 widget.destroy()
             except Exception:
                 pass
         self.trend_widgets.clear()
+        self.rating_widgets.clear()
 
     def _schedule_trend_render(self, delay: int = 80) -> None:
         if self.trend_render_job is not None:
@@ -2226,24 +2863,41 @@ class PriceTrackerApp:
         tree_height = self.market_tree.winfo_height()
         display_columns = self.market_tree["displaycolumns"]
         visible = set() if display_columns == "#all" or display_columns == ("#all",) else set(display_columns)
-        if visible and "trend" not in visible:
-            return
+        render_trend = not visible or "trend" in visible
+        render_rating = not visible or "rating" in visible
         for iid in self.market_tree.get_children():
-            bbox = self.market_tree.bbox(iid, "trend")
-            if not bbox:
-                continue
-            x, y, width, height = bbox
-            if width <= 8 or height <= 8 or y < 0 or y + height > tree_height - 3:
-                continue
-            values, percent = self.trend_data.get(iid, ([], ""))
             tags = self.market_tree.item(iid, "tags")
             bg = "#fff7d6" if "pinned" in tags else "#ffffff"
-            canvas_w = max(1, width - 4)
-            canvas_h = max(1, height - 4)
-            canvas = Canvas(self.market_tree, width=canvas_w, height=canvas_h, highlightthickness=0, bg=bg)
-            canvas.place(x=x + 2, y=y + 2)
-            self._draw_trend(canvas, values, percent, canvas_w, canvas_h)
-            self.trend_widgets.append(canvas)
+            if render_trend:
+                bbox = self.market_tree.bbox(iid, "trend")
+                if bbox:
+                    x, y, width, height = bbox
+                    if width > 8 and height > 8 and y >= 0 and y + height <= tree_height - 3:
+                        values, percent = self.trend_data.get(iid, ([], ""))
+                        canvas_w = max(1, width - 4)
+                        canvas_h = max(1, height - 4)
+                        canvas = Canvas(self.market_tree, width=canvas_w, height=canvas_h, highlightthickness=0, bg=bg)
+                        canvas.place(x=x + 2, y=y + 2)
+                        self._draw_trend(canvas, values, percent, canvas_w, canvas_h)
+                        self.trend_widgets.append(canvas)
+            if render_rating:
+                self._render_market_rating_cell(iid, bg, tree_height)
+
+    def _render_market_rating_cell(self, iid: str, bg: str, tree_height: int) -> None:
+        row = self.market_row_data.get(iid)
+        if row is None or not self._rating_available(row.realtime_record_id, row.source):
+            return
+        bbox = self.market_tree.bbox(iid, "rating")
+        if not bbox:
+            return
+        x, y, width, height = bbox
+        if width <= 42 or height <= 18 or y < 0 or y + height > tree_height - 3:
+            return
+        holder_width = min(max(78, width - 4), 116)
+        holder = Frame(self.market_tree, bg=bg)
+        holder.place(x=x + max(2, int((width - holder_width) / 2)), y=y + max(1, int((height - 28) / 2)), width=holder_width, height=28)
+        self._rating_button(holder, row.realtime_record_id, bg, size=20, upvotes=row.realtime_upvotes).pack(side=LEFT)
+        self.rating_widgets.append(holder)
 
     def _draw_trend(self, canvas: Canvas, values: list[float], percent: str, width: int, height: int) -> None:
         color = "#7b8794"
@@ -2288,6 +2942,7 @@ class PriceTrackerApp:
             "trend": 1.7,
             "count": 0.8,
             "source": 1.35,
+            "rating": 1.05,
             "updated": 1.8,
             "favorite": 0.9,
         }
@@ -2299,6 +2954,7 @@ class PriceTrackerApp:
             "trend": 150,
             "count": 78,
             "source": 120,
+            "rating": 118,
             "updated": 165,
             "favorite": 90,
         }
@@ -2338,7 +2994,7 @@ class PriceTrackerApp:
         item_name = self.context_item_name
         if not item_name:
             return
-        ok = messagebox.askyesno("删除记录", f"确定删除“{item_name}”的所有本地价格记录吗？")
+        ok = messagebox.askyesno("删除记录", f"确定删除“{item_name}”的所有本地价格记录和实时导入记录吗？")
         if not ok:
             return
         self.db.delete_item(item_name)
@@ -2405,6 +3061,12 @@ class PriceTrackerApp:
         save_config(self.config)
         self.refresh_market_table()
 
+    def _realtime_min_upvotes(self) -> int:
+        try:
+            return max(0, int(getattr(self.config, "realtime_min_upvotes", 0) or 0))
+        except (TypeError, ValueError):
+            return 0
+
     def _format_time(self, value: str) -> str:
         try:
             dt = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -2424,6 +3086,7 @@ class PriceTrackerApp:
             "trend": "走势",
             "count": "记录",
             "source": "来源",
+            "rating": "评价",
             "updated": "更新时间",
             "favorite": "收藏",
         }
@@ -2447,7 +3110,7 @@ class PriceTrackerApp:
         window.title("显示列")
         window.geometry("360x420")
         variables: dict[str, StringVar] = {}
-        labels = ["序号", "图标", "物品", "价格", "单位", "走势", "记录", "来源", "更新时间", "收藏"]
+        labels = ["序号", "图标", "物品", "价格", "单位", "走势", "记录", "来源", "评价", "更新时间", "收藏"]
         body = Frame(window, padx=16, pady=16)
         body.pack(fill=BOTH, expand=True)
         for label in labels:
@@ -2480,6 +3143,10 @@ class PriceTrackerApp:
             self.config.hotkeys.quick_price,
             lambda: self._post_event("quick_price"),
         )
+        self.hotkeys.register(
+            self.config.hotkeys.realtime_import,
+            lambda: self._post_event("realtime_import"),
+        )
         self.hotkeys.start()
         if self.hotkeys.errors:
             self.status_var.set("；".join(self.hotkeys.errors))
@@ -2495,7 +3162,8 @@ class PriceTrackerApp:
                 "快捷键已加载："
                 f"截图识别 {self.config.hotkeys.lookup_hovered}，"
                 f"搜索 {self.config.hotkeys.focus_search}，"
-                f"快速查价 {self.config.hotkeys.quick_price}"
+                f"快速查价 {self.config.hotkeys.quick_price}，"
+                f"实时价格导入 {self.config.hotkeys.realtime_import}"
             )
 
     def _post_event(self, event: object) -> None:
@@ -2593,6 +3261,38 @@ class PriceTrackerApp:
                     else:
                         self._set_progress_idle("截图识别未得到可靠结果")
                         self.status_var.set(message or "截图识别未得到可靠结果。")
+                elif isinstance(event, tuple) and event[0] == "market_exchange_done":
+                    _kind, ok, parsed, raw_text, image_path, message = event
+                    self.market_exchange_running = False
+                    self._area_capture_active = False
+                    self._market_exchange_restore_window = False
+                    self.market_exchange_raw_text = raw_text
+                    self.market_exchange_image_path = Path(image_path)
+                    if ok:
+                        self._fill_market_exchange_fields(parsed)
+                        self.show_realtime_import_result(message)
+                        self._set_progress_idle("实时价格识别完成")
+                        self.status_var.set(message or "实时价格识别完成，请确认后提交。")
+                    else:
+                        self.show_realtime_import_result(message or "未识别到可靠实时价格。", failed=True)
+                        self._set_progress_idle("实时价格识别未得到可靠结果")
+                        self.status_var.set(message or "实时价格识别未得到可靠结果。")
+                elif isinstance(event, tuple) and event[0] == "realtime_sync_done":
+                    _kind, records = event
+                    self._finish_realtime_sync(records)
+                elif isinstance(event, tuple) and event[0] == "realtime_sync_error":
+                    _kind, message = event
+                    self.realtime_syncing = False
+                    self._set_progress_idle("实时价格同步失败")
+                    self.status_var.set("实时价格同步失败。")
+                    messagebox.showerror("实时价格同步失败", str(message))
+                elif isinstance(event, tuple) and event[0] == "realtime_submit_error":
+                    _kind, message = event
+                    self.status_var.set(f"实时价格远端提交失败：{message}")
+                elif isinstance(event, tuple) and event[0] == "price_share_check_done":
+                    _kind, ok, message = event
+                    self.redis_sync_status_var.set(str(message))
+                    self.status_var.set(str(message))
                 elif isinstance(event, tuple) and event[0] == "update_progress":
                     _kind, percent, url = event
                     self._set_progress_percent(percent, f"更新下载中 {percent}%：{url}")
@@ -2616,6 +3316,8 @@ class PriceTrackerApp:
                     self.quick_price_from_clipboard()
                 elif event == "focus_search":
                     self.toggle_focus_search_overlay()
+                elif event == "realtime_import":
+                    self.start_market_exchange_capture()
         except queue.Empty:
             pass
         finally:
@@ -3065,9 +3767,20 @@ class PriceTrackerApp:
 
         target_currency = self.display_currency_var.get() or self.config.display_currency
         rate = self.db.get_exalted_per_divine()
-        amount = convert_amount(row_data.latest_amount, row_data.latest_currency, target_currency, rate)
+        chaos_per_divine = self.db.get_chaos_per_divine()
+        amount = display_amount_for_item(
+            row_data.item_name, row_data.latest_amount, row_data.latest_currency, target_currency, rate, chaos_per_divine
+        )
         price_box = Frame(body, bg="#ffffff")
         price_box.pack(side=RIGHT, padx=(16, 0))
+        self._render_rating_controls(
+            price_box,
+            row_data.realtime_record_id,
+            row_data.source,
+            "#ffffff",
+            size=19,
+            upvotes=row_data.realtime_upvotes,
+        )
         Label(
             price_box,
             text=f"{amount:g} {target_currency}",
@@ -3081,6 +3794,8 @@ class PriceTrackerApp:
         self._bind_screenshot_lookup_click_recursive(item, row_data.item_name)
 
     def _bind_screenshot_lookup_click_recursive(self, widget, item_name: str) -> None:
+        if getattr(widget, "_rating_button", False):
+            return
         try:
             widget.bind("<ButtonRelease-1>", lambda _event, name=item_name: self._choose_screenshot_lookup_item(name), add="+")
         except Exception:
@@ -3195,9 +3910,16 @@ class PriceTrackerApp:
             return
 
         limit = max(1, min(10, int(getattr(self.config, "focus_search_limit", 5) or 5)))
-        rows = self.db.get_market_rows(query=query, sort_by="latest_at", descending=True, limit=limit)
+        rows = self.db.get_market_rows(
+            query=query,
+            sort_by="latest_at",
+            descending=True,
+            limit=limit,
+            min_realtime_upvotes=self._realtime_min_upvotes(),
+        )
         target_currency = self.display_currency_var.get() or self.config.display_currency
         rate = self.db.get_exalted_per_divine()
+        chaos_per_divine = self.db.get_chaos_per_divine()
         if not rows:
             self._configure_focus_result_scroll(36, False)
             row = Frame(self.focus_search_results, bg="#ffffff", pady=8)
@@ -3225,10 +3947,20 @@ class PriceTrackerApp:
             ).pack(anchor="w")
             subtitle = f"{row_data.source}  {self._format_time(row_data.latest_at)}"
             Label(name_box, text=subtitle, fg="#8a97a6", bg="#ffffff", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(1, 0))
-            amount = convert_amount(row_data.latest_amount, row_data.latest_currency, target_currency, rate)
+            amount = display_amount_for_item(
+                row_data.item_name, row_data.latest_amount, row_data.latest_currency, target_currency, rate, chaos_per_divine
+            )
             price_text = f"{amount:g} {target_currency}"
             price_box = Frame(body, bg="#ffffff")
             price_box.pack(side=RIGHT, padx=(16, 0))
+            self._render_rating_controls(
+                price_box,
+                row_data.realtime_record_id,
+                row_data.source,
+                "#ffffff",
+                size=19,
+                upvotes=row_data.realtime_upvotes,
+            )
             Label(price_box, text=price_text, fg="#c77d00", bg="#ffffff", font=("Microsoft YaHei UI", 13, "bold")).pack(anchor="e")
             trend_color = "#1f9d55" if row_data.trend_percent.startswith("+") else "#d64545" if row_data.trend_percent.startswith("-") else "#8a97a6"
             Label(price_box, text=f"趋势 {row_data.trend_percent or '暂无'}", fg=trend_color, bg="#ffffff", font=("Microsoft YaHei UI", 9)).pack(anchor="e")
@@ -3274,6 +4006,8 @@ class PriceTrackerApp:
             self._bind_focus_result_wheel_recursive(child, canvas)
 
     def _bind_focus_result_click_recursive(self, widget, item_name: str) -> None:
+        if getattr(widget, "_rating_button", False):
+            return
         try:
             widget.bind("<Button-1>", lambda _event, name=item_name: self._choose_focus_search_item(name), add="+")
         except Exception:
@@ -3334,7 +4068,7 @@ class PriceTrackerApp:
         if parsed.item_name:
             self.search_var.set(parsed.item_name)
             self.search()
-            stats = self.db.get_stats(parsed.item_name)
+            stats = self.db.get_stats(parsed.item_name, min_realtime_upvotes=self._realtime_min_upvotes())
             if stats:
                 self._show_overlay(stats)
             else:
@@ -3403,19 +4137,41 @@ class PriceTrackerApp:
             self._set_progress_idle("快速查价：未识别到物品")
             self._show_quick_price_overlay("未识别到物品名", "剪贴板内容不是可识别的游戏物品。", "", "")
             return
-        stats = self.db.get_stats(item.item_name)
+        stats = self.db.get_stats(item.item_name, min_realtime_upvotes=self._realtime_min_upvotes())
         if not stats:
             self._set_progress_idle(f"快速查价：未查询到 {item.item_name}")
             self._show_quick_price_overlay(item.item_name, "没有本地价格记录", item.rarity, "")
             return
-        history = self.db.get_price_history(stats.item_name, limit=12)
+        history = self.db.get_price_history(
+            stats.item_name,
+            limit=12,
+            min_realtime_upvotes=self._realtime_min_upvotes(),
+            prefer_realtime_if_available=True,
+        )
         trend = trend_percent([record.amount for record in history])
         price = f"{stats.latest_amount:g} {stats.latest_currency}"
         subtitle = item.rarity or "本地物价"
         self._set_progress_idle(f"快速查价：{stats.item_name} {price}")
-        self._show_quick_price_overlay(stats.item_name, price, subtitle, trend)
+        self._show_quick_price_overlay(
+            stats.item_name,
+            price,
+            subtitle,
+            trend,
+            stats.realtime_record_id,
+            stats.latest_source,
+            stats.realtime_upvotes,
+        )
 
-    def _show_quick_price_overlay(self, title: str, price: str, subtitle: str, trend: str) -> None:
+    def _show_quick_price_overlay(
+        self,
+        title: str,
+        price: str,
+        subtitle: str,
+        trend: str,
+        rating_record_id: int = 0,
+        rating_source: str = "",
+        rating_upvotes: int = 0,
+    ) -> None:
         width, height = 430, 230
         trend_color = "#2fb344" if trend.startswith("+") else "#e03131" if trend.startswith("-") else "#9fb5cf"
         overlay = self.quick_price_overlay
@@ -3452,6 +4208,8 @@ class PriceTrackerApp:
                 font=("Microsoft YaHei UI", 13, "bold"),
             )
             trend_label.pack(anchor="w", pady=(14, 0))
+            rating_frame = Frame(frame, bg="#10151d")
+            rating_frame.pack(anchor="w", pady=(12, 0))
             hint_label = Label(
                 frame,
                 text="点击或 Esc 关闭，5 秒后自动隐藏",
@@ -3465,6 +4223,7 @@ class PriceTrackerApp:
                 "title": title_label,
                 "price": price_label,
                 "trend": trend_label,
+                "rating": rating_frame,
             }
             self._bind_destroy_on_click_recursive(overlay, overlay)
 
@@ -3473,6 +4232,18 @@ class PriceTrackerApp:
         labels["title"].configure(text=title)
         labels["price"].configure(text=price)
         labels["trend"].configure(text=f"趋势 {trend or '暂无'}", fg=trend_color)
+        rating_frame = labels.get("rating")
+        if rating_frame is not None:
+            for child in rating_frame.winfo_children():
+                child.destroy()
+            self._render_rating_controls(
+                rating_frame,
+                rating_record_id,
+                rating_source,
+                "#10151d",
+                size=24,
+                upvotes=rating_upvotes,
+            )
         x = max(24, min(self.root.winfo_pointerx() + 24, overlay.winfo_screenwidth() - width - 24))
         y = max(24, min(self.root.winfo_pointery() + 24, overlay.winfo_screenheight() - height - 24))
         overlay.geometry(f"{width}x{height}+{x}+{y}")
@@ -3566,6 +4337,361 @@ class PriceTrackerApp:
         except Exception:
             pass
 
+    def _ensure_realtime_import_overlay(self) -> Toplevel:
+        overlay = self.realtime_import_overlay
+        if overlay is not None and self._toplevel_exists(overlay):
+            return overlay
+        overlay = Toplevel(self.root)
+        self.realtime_import_overlay = overlay
+        overlay.overrideredirect(True)
+        overlay.attributes("-topmost", True)
+        try:
+            overlay.attributes("-alpha", 0.95)
+        except Exception:
+            pass
+        overlay.configure(bg="#eef3f8")
+        overlay.bind("<Escape>", lambda _event: self.destroy_realtime_import_overlay())
+        frame = Frame(overlay, bg="#ffffff", padx=22, pady=18, highlightthickness=1, highlightbackground="#d8e1ea")
+        frame.pack(fill=BOTH, expand=True, padx=12, pady=12)
+        header = Frame(frame, bg="#ffffff")
+        header.pack(fill=X)
+        Label(
+            header,
+            text="实时价格导入",
+            fg="#172033",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 16, "bold"),
+        ).pack(side=LEFT)
+        submit = Button(header, text="提交记录", command=lambda: self.save_market_exchange_record(show_message=False))
+        submit.pack(side=RIGHT)
+        state = Label(
+            header,
+            text="等待识别",
+            fg="#2563eb",
+            bg="#eef6ff",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            padx=10,
+            pady=4,
+        )
+        state.configure(cursor="hand2")
+        state.bind("<Button-1>", lambda _event: self.confirm_realtime_import_result(), add="+")
+        state.pack(side=RIGHT, padx=(0, 10))
+
+        hint = Label(
+            frame,
+            text="确认识别结果后提交，记录会写入实时价格并同步到物价列表。",
+            fg="#7b8794",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 10),
+            anchor="w",
+        )
+        hint.pack(fill=X, pady=(8, 12))
+
+        table = Frame(frame, bg="#eef2f6")
+        table.pack(fill=X)
+        table.columnconfigure(1, weight=1)
+        for row_index in range(1, 5):
+            table.rowconfigure(row_index, minsize=46)
+        combo_style = ttk.Style()
+        combo_style.configure(
+            "RealtimeImport.TCombobox",
+            padding=(8, 4, 8, 4),
+            fieldbackground="#ffffff",
+            background="#ffffff",
+            foreground="#172033",
+            arrowsize=14,
+        )
+        headers = ("字段", "识别结果", "说明")
+        for col, text in enumerate(headers):
+            Label(
+                table,
+                text=text,
+                fg="#475467",
+                bg="#f8fafc",
+                font=("Microsoft YaHei UI", 10, "bold"),
+                padx=10,
+                pady=8,
+                anchor="w",
+            ).grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 1, 0), pady=(0, 1))
+
+        def field_label(row: int, text: str) -> None:
+            Label(
+                table,
+                text=text,
+                fg="#172033",
+                bg="#fbfdff",
+                font=("Microsoft YaHei UI", 11),
+                padx=10,
+                pady=9,
+                anchor="w",
+                width=8,
+            ).grid(row=row, column=0, sticky="nsew", pady=(0, 1))
+
+        def note_label(row: int, text: str) -> Label:
+            label = Label(
+                table,
+                text=text,
+                fg="#667085",
+                bg="#fbfdff",
+                font=("Microsoft YaHei UI", 10),
+                padx=10,
+                pady=9,
+                anchor="w",
+                width=16,
+            )
+            label.grid(row=row, column=2, sticky="nsew", padx=(1, 0), pady=(0, 1))
+            return label
+
+        def input_cell(row: int) -> Frame:
+            cell = Frame(table, bg="#fbfdff", padx=10, pady=5)
+            cell.grid(row=row, column=1, sticky="nsew", padx=(1, 0), pady=(0, 1))
+            cell.columnconfigure(0, weight=1)
+            return cell
+
+        field_label(1, "物品")
+        item_entry = Entry(input_cell(1), textvariable=self.realtime_item_var)
+        item_entry.grid(row=0, column=0, sticky="ew")
+        item_note = note_label(1, "可手动修正")
+
+        field_label(2, "类型")
+        side_combo = Combobox(
+            input_cell(2),
+            textvariable=self.realtime_side_var,
+            values=["买入", "卖出"],
+            state="readonly",
+            style="RealtimeImport.TCombobox",
+            height=2,
+        )
+        side_combo.grid(row=0, column=0, sticky="ew")
+        side_note = note_label(2, "根据左右通货自动判断")
+
+        field_label(3, "价格")
+        amount_entry = Entry(input_cell(3), textvariable=self.realtime_amount_var)
+        amount_entry.grid(row=0, column=0, sticky="ew")
+        amount_note = note_label(3, "只填写数字")
+
+        field_label(4, "单位")
+        currency_combo = Combobox(
+            input_cell(4),
+            textvariable=self.realtime_currency_var,
+            values=["神圣石", "崇高石", "混沌石"],
+            state="readonly",
+            style="RealtimeImport.TCombobox",
+            height=3,
+        )
+        currency_combo.grid(row=0, column=0, sticky="ew")
+        currency_note = note_label(4, "常用流通通货")
+
+        message = Label(
+            frame,
+            text="",
+            fg="#667085",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 10),
+            anchor="w",
+            justify=LEFT,
+            wraplength=620,
+            height=2,
+        )
+        message.pack(fill=X, pady=(10, 0))
+        current_price = Label(
+            frame,
+            text="当前记录：等待识别",
+            fg="#344054",
+            bg="#ffffff",
+            font=("Microsoft YaHei UI", 10, "bold"),
+            anchor="w",
+            justify=LEFT,
+            wraplength=620,
+            height=2,
+        )
+        current_price.pack(fill=X, pady=(6, 0))
+
+        buttons = Frame(frame, bg="#ffffff")
+        buttons.pack(fill=X, side="bottom", pady=(8, 0))
+        Button(buttons, text="关闭", command=self.destroy_realtime_import_overlay).pack(side=RIGHT)
+        self.realtime_import_labels = {
+            "state": state,
+            "hint": hint,
+            "item_note": item_note,
+            "side_note": side_note,
+            "amount_note": amount_note,
+            "currency_note": currency_note,
+            "message": message,
+            "current_price": current_price,
+            "submit": submit,
+            "item_entry": item_entry,
+            "side_combo": side_combo,
+            "amount_entry": amount_entry,
+            "currency_combo": currency_combo,
+        }
+        for widget in (item_entry, amount_entry):
+            widget.bind("<KeyRelease>", lambda _event: self._mark_realtime_import_pending(), add="+")
+        item_entry.bind("<KeyRelease>", lambda _event: self._update_realtime_current_price_label(), add="+")
+        for widget in (side_combo, currency_combo):
+            widget.bind("<<ComboboxSelected>>", lambda _event: self._mark_realtime_import_pending(), add="+")
+        self._bind_realtime_import_drag_recursive(frame)
+        self._position_realtime_import_overlay()
+        return overlay
+
+    def _position_realtime_import_overlay(self, width: int = 720, height: int = 470) -> None:
+        overlay = self.realtime_import_overlay
+        if overlay is None:
+            return
+        screen_width = overlay.winfo_screenwidth()
+        screen_height = overlay.winfo_screenheight()
+        x = max(24, int((screen_width - width) / 2))
+        y = max(24, int(screen_height * (1 - 0.618)) - int(height / 2))
+        overlay.geometry(f"{width}x{height}+{x}+{y}")
+
+    def show_realtime_import_loading(self) -> None:
+        overlay = self._ensure_realtime_import_overlay()
+        labels = self.realtime_import_labels
+        self.realtime_item_var.set("")
+        self.realtime_side_var.set("买入")
+        self.realtime_amount_var.set("")
+        self.realtime_currency_var.set("崇高石")
+        self.realtime_import_confirmed = False
+        labels["state"].configure(text="识别中", fg="#2563eb", bg="#eef6ff")
+        labels["hint"].configure(text="正在分析截图中的物品和交易比例，请稍候。")
+        labels["item_note"].configure(text="等待结果")
+        labels["side_note"].configure(text="等待结果")
+        labels["amount_note"].configure(text="等待结果")
+        labels["currency_note"].configure(text="等待结果")
+        labels["message"].configure(text="识别完成后可直接确认提交，也可以先修改表格内容。")
+        labels["current_price"].configure(text="当前记录：等待识别")
+        labels["submit"].configure(state="disabled")
+        self._position_realtime_import_overlay()
+        overlay.lift()
+
+    def show_realtime_import_result(self, message: str = "", failed: bool = False) -> None:
+        overlay = self._ensure_realtime_import_overlay()
+        labels = self.realtime_import_labels
+        if failed:
+            labels["state"].configure(text="未识别", fg="#b42318", bg="#fff1f3")
+            labels["hint"].configure(text="没有识别到可靠价格，可以重新截图，或手动补充后提交。")
+            labels["item_note"].configure(text="需要填写")
+            labels["side_note"].configure(text="可选择")
+            labels["amount_note"].configure(text="需要填写")
+            labels["currency_note"].configure(text="可选择")
+            labels["message"].configure(text="建议框选完整市场区域，包含左右两侧物品和比例。")
+            labels["current_price"].configure(text="当前记录：未查询")
+            self._mark_realtime_import_pending()
+        else:
+            item_name = self.realtime_item_var.get().strip() or "未识别物品"
+            side = self.realtime_side_var.get().strip() or "买入"
+            amount = self.realtime_amount_var.get().strip()
+            currency = self.realtime_currency_var.get().strip() or "崇高石"
+            self._mark_realtime_import_pending()
+            labels["hint"].configure(text="请核对表格内容，确认无误后提交。")
+            labels["item_note"].configure(text="已识别" if item_name and item_name != "未识别物品" else "需要修正")
+            labels["side_note"].configure(text=f"识别为{side}价")
+            labels["amount_note"].configure(text="已识别" if amount else "需要填写")
+            labels["currency_note"].configure(text=currency)
+            labels["message"].configure(text=self.realtime_confidence_var.get().strip() or "请核对后提交。")
+            self._update_realtime_current_price_label()
+            self._update_realtime_import_submit_state()
+        self._position_realtime_import_overlay()
+        overlay.lift()
+
+    def _mark_realtime_import_pending(self) -> None:
+        self.realtime_import_confirmed = False
+        labels = self.realtime_import_labels
+        state = labels.get("state")
+        if state is not None:
+            state.configure(text="待确认", fg="#92400e", bg="#fef3c7", cursor="hand2")
+        self._update_realtime_import_submit_state()
+
+    def confirm_realtime_import_result(self) -> None:
+        if not self.realtime_import_labels:
+            return
+        self.realtime_import_confirmed = True
+        state = self.realtime_import_labels.get("state")
+        if state is not None:
+            state.configure(text="已确认", fg="#067647", bg="#ecfdf3", cursor="hand2")
+        self._update_realtime_import_submit_state()
+
+    def _update_realtime_import_submit_state(self) -> None:
+        labels = self.realtime_import_labels
+        submit = labels.get("submit")
+        if submit is None:
+            return
+        item_name = self.realtime_item_var.get().strip()
+        try:
+            amount = float(self.realtime_amount_var.get().strip().replace(",", "."))
+        except ValueError:
+            amount = 0
+        enabled = (
+            self.realtime_import_confirmed
+            and bool(item_name)
+            and amount > 0
+            and bool(self.realtime_currency_var.get().strip())
+        )
+        try:
+            submit.configure(state="normal" if enabled else "disabled")
+        except Exception:
+            pass
+
+    def _update_realtime_current_price_label(self) -> None:
+        labels = self.realtime_import_labels
+        label = labels.get("current_price")
+        if label is None:
+            return
+        item_name = self.realtime_item_var.get().strip()
+        if not item_name:
+            label.configure(text="当前记录：未查询")
+            return
+        stats = self.db.get_stats(item_name, min_realtime_upvotes=self._realtime_min_upvotes())
+        if stats is None:
+            label.configure(text="当前记录：本地暂无价格")
+            return
+        target_currency = self.display_currency_var.get() or self.config.display_currency
+        rate = self.db.get_exalted_per_divine()
+        chaos_per_divine = self.db.get_chaos_per_divine()
+        amount = display_amount_for_item(
+            stats.item_name,
+            stats.latest_amount,
+            stats.latest_currency,
+            target_currency,
+            rate,
+            chaos_per_divine,
+        )
+        source = stats.latest_source or "未知来源"
+        updated = self._format_time(stats.latest_at)
+        label.configure(text=f"当前记录：{amount:g} {target_currency} · 来源：{source} · {updated}")
+
+    def destroy_realtime_import_overlay(self) -> None:
+        overlay = self.realtime_import_overlay
+        self.realtime_import_overlay = None
+        self.realtime_import_labels = {}
+        if overlay is not None and self._toplevel_exists(overlay):
+            overlay.destroy()
+
+    def _bind_realtime_import_drag_recursive(self, widget) -> None:
+        try:
+            widget.bind("<ButtonPress-1>", self._start_realtime_import_drag, add="+")
+            widget.bind("<B1-Motion>", self._drag_realtime_import_overlay, add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            if isinstance(child, (ttk.Button, ttk.Entry, ttk.Combobox)):
+                continue
+            self._bind_realtime_import_drag_recursive(child)
+
+    def _start_realtime_import_drag(self, event) -> None:
+        overlay = self.realtime_import_overlay
+        if overlay is None:
+            return
+        self.screenshot_lookup_drag_start = (event.x_root, event.y_root, overlay.winfo_x(), overlay.winfo_y())
+
+    def _drag_realtime_import_overlay(self, event) -> None:
+        overlay = self.realtime_import_overlay
+        start = self.screenshot_lookup_drag_start
+        if overlay is None or start is None:
+            return
+        start_x, start_y, window_x, window_y = start
+        overlay.geometry(f"+{window_x + event.x_root - start_x}+{window_y + event.y_root - start_y}")
+
     def open_capture_workbench(self) -> None:
         try:
             image_path = capture_full_screen(
@@ -3589,7 +4715,12 @@ class PriceTrackerApp:
             self.status_var.set("截图识别正在进行中。")
             return
         self._area_capture_active = True
-        self._restore_after_area_capture = restore_after
+        self._restore_after_area_capture = restore_after or (
+            self._should_update_ocr_review_page()
+            and getattr(self, "current_page_name", "") == "ocr"
+            and self.root.state() != "withdrawn"
+            and bool(self.root.winfo_viewable())
+        )
         self.root.withdraw()
         self.root.update_idletasks()
         self.root.after(25, self._capture_for_selection)
@@ -3614,6 +4745,124 @@ class PriceTrackerApp:
         self._area_capture_active = False
         if self._restore_after_area_capture:
             self.root.deiconify()
+
+    def start_market_exchange_capture(self) -> None:
+        if self._area_capture_active:
+            self.status_var.set("截图识别正在进行中。")
+            return
+        self._area_capture_active = True
+        self._market_exchange_restore_window = self.root.state() != "withdrawn" and bool(self.root.winfo_viewable())
+        self.root.withdraw()
+        self.root.update_idletasks()
+        self.root.after(25, self._capture_for_market_exchange_selection)
+
+    def _capture_for_market_exchange_selection(self) -> None:
+        try:
+            screenshot = capture_full_screen_image()
+        except Exception as exc:
+            self._area_capture_active = False
+            if self._market_exchange_restore_window:
+                self.root.deiconify()
+            messagebox.showerror("截图失败", str(exc))
+            return
+        ScreenshotSelectionOverlay(
+            self.root,
+            screenshot,
+            self._recognize_market_exchange_area,
+            on_cancel=self._cancel_market_exchange_capture,
+        )
+
+    def _cancel_market_exchange_capture(self) -> None:
+        self._area_capture_active = False
+        if self._market_exchange_restore_window:
+            self.root.deiconify()
+
+    def _recognize_market_exchange_area(self, image_source: Path | Image.Image, box: tuple[int, int, int, int]) -> None:
+        if self._market_exchange_restore_window:
+            self.root.deiconify()
+        self._begin_market_exchange_recognition(image_source, box)
+
+    def import_market_exchange_image(self) -> None:
+        path = filedialog.askopenfilename(
+            title="选择实时价格截图",
+            filetypes=[
+                ("图片文件", "*.png;*.jpg;*.jpeg;*.bmp;*.webp"),
+                ("所有文件", "*.*"),
+            ],
+        )
+        if not path:
+            return
+        self._begin_market_exchange_recognition(Path(path), None)
+
+    def _begin_market_exchange_recognition(
+        self,
+        image_source: Path | Image.Image,
+        box: tuple[int, int, int, int] | None,
+    ) -> None:
+        self.market_exchange_running = True
+        self.market_exchange_raw_text = ""
+        self.market_exchange_image_path = Path()
+        self._update_market_exchange_text()
+        self.show_realtime_import_loading()
+        self._set_progress_busy("正在识别实时价格...")
+        self.status_var.set("正在识别实时价格，请稍候。")
+        threading.Thread(
+            target=self._market_exchange_recognition_worker,
+            args=(image_source, box),
+            daemon=True,
+        ).start()
+
+    def _market_exchange_recognition_worker(
+        self,
+        image_source: Path | Image.Image,
+        box: tuple[int, int, int, int] | None,
+    ) -> None:
+        crop_path = Path()
+        previous_priority = None
+        worker_db = None
+        try:
+            if getattr(self.config, "ocr_low_priority", True):
+                previous_priority = self._set_ocr_process_priority(True)
+            if box is None:
+                if isinstance(image_source, Image.Image):
+                    crop_path = save_image(
+                        image_source,
+                        self.config.screenshots_path,
+                        "market-exchange",
+                        max_files=self._screenshot_retention_count(),
+                    )
+                else:
+                    crop_path = Path(image_source)
+                ocr_path = prepare_image_for_ocr(
+                    crop_path,
+                    self.config.screenshots_path,
+                    "market-exchange-ocr",
+                    max_files=self._screenshot_retention_count(),
+                )
+            else:
+                crop_path, ocr_path = crop_and_prepare_for_ocr(
+                    image_source,
+                    box,
+                    self.config.screenshots_path,
+                    "market-exchange",
+                    "market-exchange-ocr",
+                    max_files=self._screenshot_retention_count(),
+                )
+            with self.ocr_lock:
+                result = self.ocr.recognize(ocr_path)
+            self._restore_process_priority(previous_priority)
+            previous_priority = None
+            worker_db = PriceDatabase(self.config.database_path)
+            parsed = parse_market_exchange(ocr_path, result, db=worker_db)
+            ok = bool(parsed.want_item and parsed.have_item and parsed.market_want_amount and parsed.market_have_amount)
+            message = parsed.message or result.message
+            self._post_event(("market_exchange_done", ok, parsed, result.text, str(crop_path), message))
+        except Exception as exc:
+            self._post_event(("market_exchange_done", False, ParsedMarketExchange(), "", str(crop_path), str(exc)))
+        finally:
+            self._restore_process_priority(previous_priority)
+            if worker_db is not None:
+                worker_db.close()
 
     def _recognize_selected_area(self, image_source: Path | Image.Image, box: tuple[int, int, int, int]) -> None:
         if self._restore_after_area_capture:
@@ -3725,7 +4974,13 @@ class PriceTrackerApp:
             confidence = max(candidate.confidence, min(1.0, 0.35 + match_score * 0.65))
             if match_score < 0.92 or confidence < 0.92:
                 continue
-            rows = db.get_market_rows(query=matched_name, sort_by="latest_at", descending=True, limit=5)
+            rows = db.get_market_rows(
+                query=matched_name,
+                sort_by="latest_at",
+                descending=True,
+                limit=5,
+                min_realtime_upvotes=self._realtime_min_upvotes(),
+            )
             if not rows:
                 continue
             exact_key = normalize_name(matched_name)
@@ -3940,6 +5195,141 @@ class PriceTrackerApp:
         state = self._read_sync_state()
         state["last_economy_sync_attempt_at"] = datetime.now().isoformat(timespec="seconds")
         self._write_sync_state(state)
+
+    def _realtime_sync_remaining_seconds(self) -> int:
+        value = str(self._read_sync_state().get("last_realtime_sync_attempt_at", ""))
+        if not value:
+            return 0
+        try:
+            last = datetime.fromisoformat(value)
+        except ValueError:
+            return 0
+        elapsed = (datetime.now() - last).total_seconds()
+        return max(0, int(30 * 60 - elapsed))
+
+    def _record_realtime_sync_attempt(self) -> None:
+        state = self._read_sync_state()
+        state["last_realtime_sync_attempt_at"] = datetime.now().isoformat(timespec="seconds")
+        self._write_sync_state(state)
+
+    def _realtime_credit_value(self, amount: float, currency: str) -> float:
+        try:
+            return convert_amount(
+                float(amount),
+                currency,
+                "神圣石",
+                self.db.get_exalted_per_divine(),
+                self.db.get_chaos_per_divine(),
+            )
+        except Exception:
+            try:
+                return float(amount)
+            except (TypeError, ValueError):
+                return 0.0
+
+    def _record_realtime_submission_credit(self, item_name: str, amount: float, currency: str) -> None:
+        key = normalize_name(item_name)
+        if not key:
+            return
+        current_value = self._realtime_credit_value(amount, currency)
+        previous_value = self.realtime_sync_credit_prices.get(key)
+        gained = 0.0
+        if previous_value is None:
+            gained = 1.0
+        elif previous_value > 0 and current_value > 0:
+            change = abs(current_value - previous_value) / previous_value
+            if change >= 0.05:
+                gained = 0.5
+        self.realtime_sync_credit_prices[key] = current_value
+        if gained <= 0:
+            self.status_var.set(f"已记录实时价格。共享贡献积分：{self.realtime_sync_credit_score:g}/5。")
+            return
+        self.realtime_sync_credit_score += gained
+        granted = 0
+        while self.realtime_sync_credit_score >= 5:
+            self.realtime_sync_free_uses += 1
+            self.realtime_sync_credit_score -= 5
+            granted += 1
+        if granted:
+            self.status_var.set(f"已获得 {granted} 次同步实时价格机会。当前贡献积分：{self.realtime_sync_credit_score:g}/5。")
+        else:
+            self.status_var.set(f"共享贡献积分 +{gained:g}，当前 {self.realtime_sync_credit_score:g}/5。")
+
+    def _consume_realtime_sync_permission(self) -> bool:
+        remaining = self._realtime_sync_remaining_seconds()
+        if remaining <= 0:
+            return True
+        if self.realtime_sync_free_uses > 0:
+            self.realtime_sync_free_uses -= 1
+            return True
+        minutes = remaining // 60
+        seconds = remaining % 60
+        text = f"同步实时价格每 30 分钟可用一次；贡献积分满 5 分也可获得一次机会。请 {minutes:02d}:{seconds:02d} 后再试。"
+        self.progress_var.set(text)
+        self.status_var.set(text)
+        messagebox.showinfo("同步暂不可用", text)
+        return False
+
+    def sync_realtime_prices(self) -> None:
+        if self.realtime_syncing:
+            self.progress_var.set("实时价格同步正在进行中，请稍候...")
+            return
+        self.realtime_sync_client = RealtimeSyncClient.from_config(
+            self.config.data_path,
+            self.config.price_share_service_url,
+        )
+        if not self.realtime_sync_client.can_read():
+            messagebox.showinfo(
+                "未配置实时同步",
+                "还没有配置实时价格同步服务。请先在本机安全配置中保存 Redis 地址和读取密钥。",
+            )
+            return
+        if not self._consume_realtime_sync_permission():
+            return
+        self._record_realtime_sync_attempt()
+        self.realtime_syncing = True
+        self._set_progress_percent(0, "正在同步实时价格，请稍候...")
+        self.status_var.set("实时价格同步中...")
+        threading.Thread(target=self._realtime_sync_worker, daemon=True).start()
+
+    def _realtime_sync_worker(self) -> None:
+        try:
+            records = self.realtime_sync_client.fetch_all()
+        except Exception as exc:
+            self._post_event(("realtime_sync_error", str(exc)))
+            return
+        self._post_event(("realtime_sync_done", records))
+
+    def _finish_realtime_sync(self, records: list[RemoteRealtimePrice]) -> None:
+        saved = 0
+        for record in records:
+            self.db.upsert_synced_realtime_price_record(
+                remote_key=record.remote_key,
+                item_name=record.item_name,
+                side=record.side,
+                amount=record.amount,
+                currency=record.currency,
+                upvotes=record.upvotes,
+                want_item=record.want_item,
+                have_item=record.have_item,
+                market_want_amount=record.market_want_amount,
+                market_have_amount=record.market_have_amount,
+                user_want_amount=record.user_want_amount,
+                user_have_amount=record.user_have_amount,
+                item_match=record.item_match,
+                item_known=record.item_known,
+                source=record.source,
+                captured_at=record.captured_at,
+                confidence=record.confidence,
+                raw_text=record.raw_text,
+                screenshot_path=record.screenshot_path,
+                note=record.note,
+            )
+            saved += 1
+        self.realtime_syncing = False
+        self.refresh_market_table()
+        self._set_progress_idle(f"实时价格同步完成：{saved} 条。")
+        self.status_var.set(f"实时价格同步完成：{saved} 条。")
 
     def sync_poe2db_currency(self) -> None:
         if self.syncing:

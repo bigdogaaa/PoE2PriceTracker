@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from difflib import SequenceMatcher
@@ -58,6 +59,7 @@ class PriceRecord:
     confidence: float
     raw_text: str
     screenshot_path: str
+    realtime_record_id: int = 0
 
 
 @dataclass(frozen=True)
@@ -70,6 +72,11 @@ class PriceStats:
     min_amount: float
     max_amount: float
     avg_amount: float
+    latest_source: str = ""
+    latest_record_id: int = 0
+    realtime_record_id: int = 0
+    realtime_upvotes: int = 0
+    realtime_downvotes: int = 0
 
 
 @dataclass(frozen=True)
@@ -89,6 +96,10 @@ class MarketRow:
     trend_percent: str
     favorite: bool
     pinned: bool
+    latest_record_id: int = 0
+    realtime_record_id: int = 0
+    realtime_upvotes: int = 0
+    realtime_downvotes: int = 0
 
 
 @dataclass(frozen=True)
@@ -99,6 +110,56 @@ class IconAsset:
     icon_url: str
     local_path: str
     phash: str
+
+
+@dataclass(frozen=True)
+class MarketExchangeRecord:
+    id: int
+    want_item: str
+    have_item: str
+    want_item_match: str
+    have_item_match: str
+    want_item_known: bool
+    have_item_known: bool
+    want_item_is_currency: bool
+    have_item_is_currency: bool
+    market_want_amount: float
+    market_have_amount: float
+    user_want_amount: float
+    user_have_amount: float
+    source: str
+    captured_at: str
+    confidence: float
+    raw_text: str
+    screenshot_path: str
+    note: str
+
+
+@dataclass(frozen=True)
+class RealtimePriceRecord:
+    id: int
+    item_name: str
+    item_match: str
+    item_known: bool
+    side: str
+    amount: float
+    currency: str
+    want_item: str
+    have_item: str
+    market_want_amount: float
+    market_have_amount: float
+    user_want_amount: float
+    user_have_amount: float
+    source: str
+    captured_at: str
+    confidence: float
+    raw_text: str
+    screenshot_path: str
+    note: str
+    upvotes: int = 0
+    downvotes: int = 0
+    mirrored_price_record_id: int = 0
+    remote_key: str = ""
 
 
 class PriceDatabase:
@@ -134,7 +195,8 @@ class PriceDatabase:
                 captured_at TEXT NOT NULL,
                 confidence REAL NOT NULL DEFAULT 0,
                 raw_text TEXT NOT NULL DEFAULT '',
-                screenshot_path TEXT NOT NULL DEFAULT ''
+                screenshot_path TEXT NOT NULL DEFAULT '',
+                realtime_record_id INTEGER NOT NULL DEFAULT 0
             );
 
             CREATE INDEX IF NOT EXISTS idx_items_normalized_name
@@ -167,9 +229,168 @@ class PriceDatabase:
 
             CREATE INDEX IF NOT EXISTS idx_icon_assets_lookup
                 ON icon_assets(kind, normalized_name);
+
+            CREATE TABLE IF NOT EXISTS market_exchange_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                want_item TEXT NOT NULL,
+                have_item TEXT NOT NULL,
+                want_item_match TEXT NOT NULL DEFAULT '',
+                have_item_match TEXT NOT NULL DEFAULT '',
+                want_item_known INTEGER NOT NULL DEFAULT 0,
+                have_item_known INTEGER NOT NULL DEFAULT 0,
+                want_item_is_currency INTEGER NOT NULL DEFAULT 0,
+                have_item_is_currency INTEGER NOT NULL DEFAULT 0,
+                market_want_amount REAL NOT NULL,
+                market_have_amount REAL NOT NULL,
+                user_want_amount REAL NOT NULL,
+                user_have_amount REAL NOT NULL,
+                source TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0,
+                raw_text TEXT NOT NULL DEFAULT '',
+                screenshot_path TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                upvotes INTEGER NOT NULL DEFAULT 0,
+                downvotes INTEGER NOT NULL DEFAULT 0,
+                mirrored_price_record_id INTEGER NOT NULL DEFAULT 0
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_market_exchange_records_time
+                ON market_exchange_records(captured_at DESC);
+
+            CREATE TABLE IF NOT EXISTS realtime_price_records (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                item_name TEXT NOT NULL,
+                item_match TEXT NOT NULL DEFAULT '',
+                item_known INTEGER NOT NULL DEFAULT 0,
+                side TEXT NOT NULL,
+                amount REAL NOT NULL,
+                currency TEXT NOT NULL,
+                want_item TEXT NOT NULL DEFAULT '',
+                have_item TEXT NOT NULL DEFAULT '',
+                market_want_amount REAL NOT NULL DEFAULT 0,
+                market_have_amount REAL NOT NULL DEFAULT 0,
+                user_want_amount REAL NOT NULL DEFAULT 0,
+                user_have_amount REAL NOT NULL DEFAULT 0,
+                source TEXT NOT NULL,
+                captured_at TEXT NOT NULL,
+                confidence REAL NOT NULL DEFAULT 0,
+                raw_text TEXT NOT NULL DEFAULT '',
+                screenshot_path TEXT NOT NULL DEFAULT '',
+                note TEXT NOT NULL DEFAULT '',
+                remote_key TEXT NOT NULL DEFAULT ''
+            );
+
+            CREATE INDEX IF NOT EXISTS idx_realtime_price_records_item_time
+                ON realtime_price_records(item_name, captured_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_realtime_price_records_side_time
+                ON realtime_price_records(side, captured_at DESC);
             """
         )
+        self._ensure_market_exchange_columns()
+        self._ensure_price_record_columns()
+        self._ensure_realtime_price_columns()
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_price_records_realtime_record ON price_records(realtime_record_id)"
+        )
         self.conn.commit()
+        self._repair_realtime_price_mirrors()
+
+    def _ensure_market_exchange_columns(self) -> None:
+        existing = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(market_exchange_records)").fetchall()
+        }
+        columns = {
+            "want_item_match": "TEXT NOT NULL DEFAULT ''",
+            "have_item_match": "TEXT NOT NULL DEFAULT ''",
+            "want_item_known": "INTEGER NOT NULL DEFAULT 0",
+            "have_item_known": "INTEGER NOT NULL DEFAULT 0",
+            "want_item_is_currency": "INTEGER NOT NULL DEFAULT 0",
+            "have_item_is_currency": "INTEGER NOT NULL DEFAULT 0",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                self.conn.execute(f"ALTER TABLE market_exchange_records ADD COLUMN {name} {definition}")
+
+    def _ensure_price_record_columns(self) -> None:
+        existing = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(price_records)").fetchall()
+        }
+        if "realtime_record_id" not in existing:
+            self.conn.execute("ALTER TABLE price_records ADD COLUMN realtime_record_id INTEGER NOT NULL DEFAULT 0")
+
+    def _ensure_realtime_price_columns(self) -> None:
+        existing = {
+            str(row["name"])
+            for row in self.conn.execute("PRAGMA table_info(realtime_price_records)").fetchall()
+        }
+        columns = {
+            "upvotes": "INTEGER NOT NULL DEFAULT 0",
+            "downvotes": "INTEGER NOT NULL DEFAULT 0",
+            "mirrored_price_record_id": "INTEGER NOT NULL DEFAULT 0",
+            "remote_key": "TEXT NOT NULL DEFAULT ''",
+        }
+        for name, definition in columns.items():
+            if name not in existing:
+                self.conn.execute(f"ALTER TABLE realtime_price_records ADD COLUMN {name} {definition}")
+        self.conn.execute(
+            """
+            CREATE UNIQUE INDEX IF NOT EXISTS idx_realtime_price_records_remote_key
+                ON realtime_price_records(remote_key)
+                WHERE remote_key <> ''
+            """
+        )
+
+    def _repair_realtime_price_mirrors(self) -> None:
+        rows = self.conn.execute(
+            """
+            SELECT
+                rp.id, rp.item_name, rp.side, rp.amount, rp.currency, rp.source,
+                rp.captured_at, rp.confidence, rp.raw_text, rp.screenshot_path
+            FROM realtime_price_records rp
+            WHERE rp.amount > 0
+              AND rp.item_name <> ''
+              AND NOT EXISTS (
+                  SELECT 1 FROM price_records pr
+                  WHERE pr.realtime_record_id = rp.id
+              )
+            ORDER BY rp.captured_at ASC, rp.id ASC
+            """
+        ).fetchall()
+        for row in rows:
+            item_name = str(row["item_name"]).strip()
+            if not item_name:
+                continue
+            item_id = self.upsert_item(item_name)
+            source = f"{str(row['source']).strip() or '实时价格导入'}-{str(row['side']).strip() or '未知'}"
+            cur = self.conn.execute(
+                """
+                INSERT INTO price_records(
+                    item_id, amount, currency, source, captured_at,
+                    confidence, raw_text, screenshot_path, realtime_record_id
+                )
+                VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    item_id,
+                    float(row["amount"]),
+                    canonical_currency(str(row["currency"])),
+                    source,
+                    str(row["captured_at"]),
+                    float(row["confidence"] or 0),
+                    str(row["raw_text"] or ""),
+                    str(row["screenshot_path"] or ""),
+                    int(row["id"]),
+                ),
+            )
+            self.conn.execute(
+                "UPDATE realtime_price_records SET mirrored_price_record_id = ? WHERE id = ?",
+                (int(cur.lastrowid), int(row["id"])),
+            )
+        if rows:
+            self.conn.commit()
 
     def upsert_item(self, item_name: str) -> int:
         normalized = normalize_name(item_name)
@@ -199,25 +420,28 @@ class PriceDatabase:
         confidence: float = 0,
         raw_text: str = "",
         screenshot_path: str = "",
+        realtime_record_id: int = 0,
+        captured_at: str | None = None,
     ) -> int:
         item_id = self.upsert_item(item_name)
         cur = self.conn.execute(
             """
             INSERT INTO price_records(
                 item_id, amount, currency, source, captured_at,
-                confidence, raw_text, screenshot_path
+                confidence, raw_text, screenshot_path, realtime_record_id
             )
-            VALUES(?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
             (
                 item_id,
                 float(amount),
                 currency.strip(),
                 source,
-                utc_now(),
+                captured_at or utc_now(),
                 float(confidence),
                 raw_text,
                 screenshot_path,
+                int(realtime_record_id or 0),
             ),
         )
         self.conn.commit()
@@ -232,6 +456,7 @@ class PriceDatabase:
         confidence: float = 0,
         raw_text: str = "",
         screenshot_path: str = "",
+        realtime_record_id: int = 0,
     ) -> int:
         item_id = self.upsert_item(item_name)
         row = self.conn.execute(
@@ -252,6 +477,7 @@ class PriceDatabase:
                 confidence=confidence,
                 raw_text=raw_text,
                 screenshot_path=screenshot_path,
+                realtime_record_id=realtime_record_id,
             )
         record_id = int(row["id"])
         self.conn.execute(
@@ -263,7 +489,8 @@ class PriceDatabase:
                 captured_at = ?,
                 confidence = ?,
                 raw_text = ?,
-                screenshot_path = ?
+                screenshot_path = ?,
+                realtime_record_id = ?
             WHERE id = ?
             """,
             (
@@ -274,6 +501,7 @@ class PriceDatabase:
                 float(confidence),
                 raw_text,
                 screenshot_path,
+                int(realtime_record_id or 0),
                 record_id,
             ),
         )
@@ -378,37 +606,63 @@ class PriceDatabase:
             return query.strip(), 0.0
         return best_name, best_score
 
-    def get_stats(self, item_name: str) -> PriceStats | None:
+    def get_stats(self, item_name: str, min_realtime_upvotes: int = 0) -> PriceStats | None:
         normalized = normalize_name(item_name)
+        min_upvotes = max(0, int(min_realtime_upvotes or 0))
         row = self.conn.execute(
             """
+            WITH eligible AS (
+                SELECT r.*
+                FROM price_records r
+                LEFT JOIN realtime_price_records rp_filter ON rp_filter.id = r.realtime_record_id
+                WHERE r.realtime_record_id = 0 OR COALESCE(rp_filter.upvotes, 0) >= ?
+            ),
+            preferred AS (
+                SELECT r.*
+                FROM eligible r
+                WHERE r.realtime_record_id > 0
+                   OR NOT EXISTS (
+                       SELECT 1
+                       FROM eligible realtime
+                       WHERE realtime.item_id = r.item_id
+                         AND realtime.realtime_record_id > 0
+                   )
+            ),
+            latest AS (
+                SELECT r.*
+                FROM preferred r
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM preferred newer
+                    WHERE newer.item_id = r.item_id
+                      AND (
+                          newer.captured_at > r.captured_at
+                          OR (newer.captured_at = r.captured_at AND newer.id > r.id)
+                      )
+                )
+            )
             SELECT
                 i.name AS item_name,
                 COUNT(r.id) AS count,
-                (
-                    SELECT amount FROM price_records rr
-                    WHERE rr.item_id = i.id
-                    ORDER BY captured_at DESC, id DESC LIMIT 1
-                ) AS latest_amount,
-                (
-                    SELECT currency FROM price_records rr
-                    WHERE rr.item_id = i.id
-                    ORDER BY captured_at DESC, id DESC LIMIT 1
-                ) AS latest_currency,
-                (
-                    SELECT captured_at FROM price_records rr
-                    WHERE rr.item_id = i.id
-                    ORDER BY captured_at DESC, id DESC LIMIT 1
-                ) AS latest_at,
+                latest.id AS latest_record_id,
+                latest.amount AS latest_amount,
+                latest.currency AS latest_currency,
+                latest.source AS latest_source,
+                latest.captured_at AS latest_at,
+                latest.realtime_record_id AS realtime_record_id,
+                COALESCE(rp.upvotes, 0) AS realtime_upvotes,
+                COALESCE(rp.downvotes, 0) AS realtime_downvotes,
                 MIN(r.amount) AS min_amount,
                 MAX(r.amount) AS max_amount,
                 AVG(r.amount) AS avg_amount
             FROM items i
-            JOIN price_records r ON r.item_id = i.id
+            JOIN latest ON latest.item_id = i.id
+            JOIN preferred r ON r.item_id = i.id
+            LEFT JOIN realtime_price_records rp ON rp.id = latest.realtime_record_id
             WHERE i.normalized_name = ?
             GROUP BY i.id
             """,
-            (normalized,),
+            (min_upvotes, normalized),
         ).fetchone()
         if not row:
             matches = self.search_items(item_name, limit=1)
@@ -416,7 +670,7 @@ class PriceDatabase:
                 return None
             if normalize_name(matches[0]) == normalized:
                 return None
-            return self.get_stats(matches[0])
+            return self.get_stats(matches[0], min_realtime_upvotes=min_upvotes)
         return PriceStats(
             item_name=str(row["item_name"]),
             count=int(row["count"]),
@@ -426,9 +680,20 @@ class PriceDatabase:
             min_amount=float(row["min_amount"]),
             max_amount=float(row["max_amount"]),
             avg_amount=float(row["avg_amount"]),
+            latest_source=str(row["latest_source"]),
+            latest_record_id=int(row["latest_record_id"] or 0),
+            realtime_record_id=int(row["realtime_record_id"] or 0),
+            realtime_upvotes=int(row["realtime_upvotes"] or 0),
+            realtime_downvotes=int(row["realtime_downvotes"] or 0),
         )
 
-    def get_recent_records(self, item_name: str = "", limit: int = 30) -> list[PriceRecord]:
+    def get_recent_records(
+        self,
+        item_name: str = "",
+        limit: int = 30,
+        min_realtime_upvotes: int = 0,
+        prefer_realtime_if_available: bool = False,
+    ) -> list[PriceRecord]:
         params: tuple[object, ...]
         where = ""
         if item_name.strip():
@@ -436,11 +701,60 @@ class PriceDatabase:
             params = (normalize_name(item_name), limit)
         else:
             params = (limit,)
+        if prefer_realtime_if_available and item_name.strip():
+            rows = self.conn.execute(
+                """
+                WITH eligible AS (
+                    SELECT r.*
+                    FROM price_records r
+                    LEFT JOIN realtime_price_records rp_filter ON rp_filter.id = r.realtime_record_id
+                    JOIN items source_item ON source_item.id = r.item_id
+                    WHERE source_item.normalized_name = ?
+                      AND (r.realtime_record_id = 0 OR COALESCE(rp_filter.upvotes, 0) >= ?)
+                ),
+                preferred AS (
+                    SELECT r.*
+                    FROM eligible r
+                    WHERE r.realtime_record_id > 0
+                       OR NOT EXISTS (
+                           SELECT 1
+                           FROM eligible realtime
+                           WHERE realtime.item_id = r.item_id
+                             AND realtime.realtime_record_id > 0
+                       )
+                )
+                SELECT
+                    r.id, i.name AS item_name, r.amount, r.currency, r.source,
+                    r.captured_at, r.confidence, r.raw_text, r.screenshot_path,
+                    r.realtime_record_id
+                FROM preferred r
+                JOIN items i ON i.id = r.item_id
+                ORDER BY r.captured_at DESC, r.id DESC
+                LIMIT ?
+                """,
+                (normalize_name(item_name), max(0, int(min_realtime_upvotes or 0)), limit),
+            ).fetchall()
+            return [
+                PriceRecord(
+                    id=int(row["id"]),
+                    item_name=str(row["item_name"]),
+                    amount=float(row["amount"]),
+                    currency=str(row["currency"]),
+                    source=str(row["source"]),
+                    captured_at=str(row["captured_at"]),
+                    confidence=float(row["confidence"]),
+                    raw_text=str(row["raw_text"]),
+                    screenshot_path=str(row["screenshot_path"]),
+                    realtime_record_id=int(row["realtime_record_id"] or 0),
+                )
+                for row in rows
+            ]
         rows = self.conn.execute(
             f"""
             SELECT
                 r.id, i.name AS item_name, r.amount, r.currency, r.source,
-                r.captured_at, r.confidence, r.raw_text, r.screenshot_path
+                r.captured_at, r.confidence, r.raw_text, r.screenshot_path,
+                r.realtime_record_id
             FROM price_records r
             JOIN items i ON i.id = r.item_id
             {where}
@@ -460,6 +774,7 @@ class PriceDatabase:
                 confidence=float(row["confidence"]),
                 raw_text=str(row["raw_text"]),
                 screenshot_path=str(row["screenshot_path"]),
+                realtime_record_id=int(row["realtime_record_id"] or 0),
             )
             for row in rows
         ]
@@ -473,14 +788,67 @@ class PriceDatabase:
         descending: bool = True,
         offset: int = 0,
         limit: int = 500,
+        target_currency: str = "",
+        conversion_rate: float = 160.0,
+        chaos_per_divine: float = 10.0,
+        min_realtime_upvotes: int = 0,
     ) -> list[MarketRow]:
+        rate = max(0.000001, float(conversion_rate or 160.0))
+        target = canonical_currency(target_currency)
+        chaos_per_divine = max(0.000001, float(chaos_per_divine or 10.0))
+        min_upvotes = max(0, int(min_realtime_upvotes or 0))
+        if sort_by == "price":
+            if target == "神圣石":
+                sort_expr = (
+                    "CASE "
+                    "WHEN i.normalized_name IN ('神圣石', 'divine orb', 'divine') THEN 1.0 "
+                    f"WHEN i.normalized_name IN ('崇高石', 'exalted orb', 'exalt', 'exalted') THEN 1.0 / {rate:.8f} "
+                    f"WHEN i.normalized_name IN ('混沌石', 'chaos orb', 'chaos') THEN 1.0 / {chaos_per_divine:.8f} "
+                    "WHEN latest.currency IN ('崇高石', '崇高', 'Exalted Orb', 'exalted orb', 'exalt', 'exalted') "
+                    f"THEN latest.amount / {rate:.8f} "
+                    "WHEN latest.currency IN ('混沌石', '混沌', 'Chaos Orb', 'chaos orb', 'chaos') "
+                    f"THEN latest.amount / {chaos_per_divine:.8f} ELSE latest.amount END"
+                )
+            elif target == "崇高石":
+                sort_expr = (
+                    "CASE "
+                    f"WHEN i.normalized_name IN ('神圣石', 'divine orb', 'divine') THEN {rate:.8f} "
+                    "WHEN i.normalized_name IN ('崇高石', 'exalted orb', 'exalt', 'exalted') THEN 1.0 "
+                    f"WHEN i.normalized_name IN ('混沌石', 'chaos orb', 'chaos') THEN {rate:.8f} / {chaos_per_divine:.8f} "
+                    "WHEN latest.currency IN ('神圣石', '神圣', 'Divine Orb', 'divine orb', 'divine') "
+                    f"THEN latest.amount * {rate:.8f} "
+                    "WHEN latest.currency IN ('混沌石', '混沌', 'Chaos Orb', 'chaos orb', 'chaos') "
+                    f"THEN latest.amount * {rate:.8f} / {chaos_per_divine:.8f} ELSE latest.amount END"
+                )
+            elif target == "混沌石":
+                sort_expr = (
+                    "CASE "
+                    f"WHEN i.normalized_name IN ('神圣石', 'divine orb', 'divine') THEN {chaos_per_divine:.8f} "
+                    f"WHEN i.normalized_name IN ('崇高石', 'exalted orb', 'exalt', 'exalted') THEN {chaos_per_divine:.8f} / {rate:.8f} "
+                    "WHEN i.normalized_name IN ('混沌石', 'chaos orb', 'chaos') THEN 1.0 "
+                    "WHEN latest.currency IN ('神圣石', '神圣', 'Divine Orb', 'divine orb', 'divine') "
+                    f"THEN latest.amount * {chaos_per_divine:.8f} "
+                    "WHEN latest.currency IN ('崇高石', '崇高', 'Exalted Orb', 'exalted orb', 'exalt', 'exalted') "
+                    f"THEN latest.amount * {chaos_per_divine:.8f} / {rate:.8f} ELSE latest.amount END"
+                )
+            else:
+                sort_expr = "latest.amount"
+        else:
+            sort_expr = ""
         allowed_sort = {
             "name": "i.name",
             "price": "latest_amount",
             "latest_at": "latest_at",
-            "count": "count",
+            "count": "record_count",
+            "source": "latest.source",
+            "favorite": "favorite",
+            "rating": "COALESCE(rp.upvotes, 0)",
+            "icon": "COALESCE(icon.local_path, '')",
+            "trend": "latest.raw_text",
+            "currency": "latest.currency",
         }
-        sort_expr = allowed_sort.get(sort_by, "latest_at")
+        if not sort_expr:
+            sort_expr = allowed_sort.get(sort_by, "latest_at")
         direction = "DESC" if descending else "ASC"
         where = []
         params: list[object] = []
@@ -493,61 +861,116 @@ class PriceDatabase:
         if favorites_only:
             where.append("f.item_id IS NOT NULL")
         where_sql = "WHERE " + " AND ".join(where) if where else ""
-        params.extend((limit, offset))
+        params = [min_upvotes, *params, limit, offset]
         rows = self.conn.execute(
             f"""
-            WITH latest AS (
+            WITH eligible AS (
                 SELECT r.*
                 FROM price_records r
-                JOIN (
-                    SELECT item_id, MAX(id) AS latest_id
-                    FROM price_records
-                    GROUP BY item_id
-                ) x ON x.latest_id = r.id
+                LEFT JOIN realtime_price_records rp_filter ON rp_filter.id = r.realtime_record_id
+                WHERE r.realtime_record_id = 0 OR COALESCE(rp_filter.upvotes, 0) >= ?
+            ),
+            preferred AS (
+                SELECT r.*
+                FROM eligible r
+                WHERE r.realtime_record_id > 0
+                   OR NOT EXISTS (
+                       SELECT 1
+                       FROM eligible realtime
+                       WHERE realtime.item_id = r.item_id
+                         AND realtime.realtime_record_id > 0
+                   )
+            ),
+            latest AS (
+                SELECT r.*
+                FROM preferred r
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM preferred newer
+                    WHERE newer.item_id = r.item_id
+                      AND (
+                          newer.captured_at > r.captured_at
+                          OR (newer.captured_at = r.captured_at AND newer.id > r.id)
+                      )
+                )
+            ),
+            page AS (
+                SELECT
+                    i.id AS item_id,
+                    i.name AS item_name,
+                    latest.id AS latest_record_id,
+                    latest.amount AS latest_amount,
+                    latest.currency AS latest_currency,
+                    latest.captured_at AS latest_at,
+                    latest.source AS source,
+                    latest.raw_text AS latest_raw_text,
+                    latest.realtime_record_id AS realtime_record_id,
+                    COALESCE(rp.upvotes, 0) AS realtime_upvotes,
+                    COALESCE(rp.downvotes, 0) AS realtime_downvotes,
+                    COALESCE(icon.local_path, '') AS item_icon_path,
+                    f.item_id IS NOT NULL AS favorite,
+                    p.item_id IS NOT NULL AS pinned,
+                    COUNT(history.id) AS record_count
+                FROM items i
+                JOIN latest ON latest.item_id = i.id
+                JOIN preferred history ON history.item_id = i.id
+                LEFT JOIN realtime_price_records rp ON rp.id = latest.realtime_record_id
+                LEFT JOIN favorites f ON f.item_id = i.id
+                LEFT JOIN pinned_items p ON p.item_id = i.id
+                LEFT JOIN (
+                    SELECT normalized_name, MAX(local_path) AS local_path
+                    FROM icon_assets
+                    WHERE kind IN ('item', 'currency') AND local_path <> ''
+                    GROUP BY normalized_name
+                ) icon ON icon.normalized_name = i.normalized_name
+                {where_sql}
+                GROUP BY i.id
+                ORDER BY pinned DESC, {sort_expr} {direction}
+                LIMIT ? OFFSET ?
             )
             SELECT
-                i.id AS item_id,
-                i.name AS item_name,
-                latest.amount AS latest_amount,
-                latest.currency AS latest_currency,
-                latest.captured_at AS latest_at,
-                latest.source AS source,
-                latest.raw_text AS latest_raw_text,
-                COALESCE(icon.local_path, '') AS item_icon_path,
-                COUNT(r.id) AS count,
-                MIN(r.amount) AS min_amount,
-                MAX(r.amount) AS max_amount,
-                AVG(r.amount) AS avg_amount,
-                f.item_id IS NOT NULL AS favorite,
-                p.item_id IS NOT NULL AS pinned
-            FROM items i
-            JOIN latest ON latest.item_id = i.id
-            JOIN price_records r ON r.item_id = i.id
-            LEFT JOIN favorites f ON f.item_id = i.id
-            LEFT JOIN pinned_items p ON p.item_id = i.id
-            LEFT JOIN (
-                SELECT normalized_name, MAX(local_path) AS local_path
-                FROM icon_assets
-                WHERE kind IN ('item', 'currency') AND local_path <> ''
-                GROUP BY normalized_name
-            ) icon ON icon.normalized_name = i.normalized_name
-            {where_sql}
-            GROUP BY i.id
-            ORDER BY {sort_expr} {direction}
-            LIMIT ? OFFSET ?
+                page.*,
+                page.record_count AS count,
+                (
+                    SELECT MIN(pr.amount)
+                    FROM preferred pr
+                    WHERE pr.item_id = page.item_id
+                ) AS min_amount,
+                (
+                    SELECT MAX(pr.amount)
+                    FROM preferred pr
+                    WHERE pr.item_id = page.item_id
+                ) AS max_amount,
+                (
+                    SELECT AVG(pr.amount)
+                    FROM preferred pr
+                    WHERE pr.item_id = page.item_id
+                ) AS avg_amount
+            FROM page
             """,
             tuple(params),
         ).fetchall()
         result = []
+        conversion_rate: float | None = None
         for row in rows:
-            history = self.get_price_history(str(row["item_name"]), limit=12)
             history_currency = str(row["latest_currency"])
-            conversion_rate = self.get_exalted_per_divine()
-            history_values = [
-                convert_amount(record.amount, record.currency, history_currency, conversion_rate)
-                for record in history
-            ]
             trend_match = __import__("re").search(r"trend=([+-]?\d+(?:\.\d+)?%)", str(row["latest_raw_text"]))
+            if int(row["count"]) >= 2:
+                history = self.get_price_history(
+                    str(row["item_name"]),
+                    limit=12,
+                    min_realtime_upvotes=min_upvotes,
+                    prefer_realtime_if_available=True,
+                )
+                if conversion_rate is None:
+                    conversion_rate = self.get_exalted_per_divine()
+                chaos_per_divine = self.get_chaos_per_divine()
+                history_values = [
+                    convert_amount(record.amount, record.currency, history_currency, conversion_rate or 160.0, chaos_per_divine)
+                    for record in history
+                ]
+            else:
+                history_values = []
             local_trend = trend_percent(history_values)
             display_trend = local_trend if len(history_values) >= 2 else (trend_match.group(1) if trend_match else "")
             result.append(
@@ -567,13 +990,24 @@ class PriceDatabase:
                     trend_percent=display_trend,
                     favorite=bool(row["favorite"]),
                     pinned=bool(row["pinned"]),
+                    latest_record_id=int(row["latest_record_id"] or 0),
+                    realtime_record_id=int(row["realtime_record_id"] or 0),
+                    realtime_upvotes=int(row["realtime_upvotes"] or 0),
+                    realtime_downvotes=int(row["realtime_downvotes"] or 0),
                 )
             )
         return result
 
-    def count_market_rows(self, query: str = "", source_filter: str = "", favorites_only: bool = False) -> int:
+    def count_market_rows(
+        self,
+        query: str = "",
+        source_filter: str = "",
+        favorites_only: bool = False,
+        min_realtime_upvotes: int = 0,
+    ) -> int:
         where = []
         params: list[object] = []
+        min_upvotes = max(0, int(min_realtime_upvotes or 0))
         for term in search_terms(query):
             where.append("i.normalized_name LIKE ?")
             params.append(f"%{term}%")
@@ -585,23 +1019,45 @@ class PriceDatabase:
         where_sql = "WHERE " + " AND ".join(where) if where else ""
         row = self.conn.execute(
             f"""
-            WITH latest AS (
+            WITH eligible AS (
                 SELECT r.*
                 FROM price_records r
-                JOIN (
-                    SELECT item_id, MAX(id) AS latest_id
-                    FROM price_records
-                    GROUP BY item_id
-                ) x ON x.latest_id = r.id
+                LEFT JOIN realtime_price_records rp_filter ON rp_filter.id = r.realtime_record_id
+                WHERE r.realtime_record_id = 0 OR COALESCE(rp_filter.upvotes, 0) >= ?
+            ),
+            preferred AS (
+                SELECT r.*
+                FROM eligible r
+                WHERE r.realtime_record_id > 0
+                   OR NOT EXISTS (
+                       SELECT 1
+                       FROM eligible realtime
+                       WHERE realtime.item_id = r.item_id
+                         AND realtime.realtime_record_id > 0
+                   )
+            ),
+            latest AS (
+                SELECT r.*
+                FROM preferred r
+                WHERE NOT EXISTS (
+                    SELECT 1
+                    FROM preferred newer
+                    WHERE newer.item_id = r.item_id
+                      AND (
+                          newer.captured_at > r.captured_at
+                          OR (newer.captured_at = r.captured_at AND newer.id > r.id)
+                      )
+                )
             )
             SELECT COUNT(DISTINCT i.id) AS count
             FROM items i
             JOIN latest ON latest.item_id = i.id
-            JOIN price_records r ON r.item_id = i.id
+            JOIN preferred r ON r.item_id = i.id
+            LEFT JOIN realtime_price_records rp ON rp.id = latest.realtime_record_id
             LEFT JOIN favorites f ON f.item_id = i.id
             {where_sql}
             """,
-            tuple(params),
+            tuple([min_upvotes, *params]),
         ).fetchone()
         return int(row["count"])
 
@@ -679,15 +1135,567 @@ class PriceDatabase:
             for row in rows
         ]
 
+    def add_market_exchange_record(
+        self,
+        want_item: str,
+        have_item: str,
+        market_want_amount: float,
+        market_have_amount: float,
+        user_want_amount: float,
+        user_have_amount: float,
+        want_item_match: str = "",
+        have_item_match: str = "",
+        want_item_known: bool = False,
+        have_item_known: bool = False,
+        want_item_is_currency: bool = False,
+        have_item_is_currency: bool = False,
+        source: str = "游戏内置市场截图",
+        confidence: float = 0,
+        raw_text: str = "",
+        screenshot_path: str = "",
+        note: str = "",
+    ) -> int:
+        cur = self.conn.execute(
+            """
+            INSERT INTO market_exchange_records(
+                want_item, have_item,
+                want_item_match, have_item_match,
+                want_item_known, have_item_known,
+                want_item_is_currency, have_item_is_currency,
+                market_want_amount, market_have_amount,
+                user_want_amount, user_have_amount,
+                source, captured_at, confidence, raw_text, screenshot_path, note
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                want_item.strip(),
+                have_item.strip(),
+                want_item_match.strip(),
+                have_item_match.strip(),
+                1 if want_item_known else 0,
+                1 if have_item_known else 0,
+                1 if want_item_is_currency else 0,
+                1 if have_item_is_currency else 0,
+                float(market_want_amount),
+                float(market_have_amount),
+                float(user_want_amount),
+                float(user_have_amount),
+                source.strip() or "游戏内置市场截图",
+                utc_now(),
+                float(confidence),
+                raw_text,
+                screenshot_path,
+                note,
+            ),
+        )
+        self.conn.commit()
+        return int(cur.lastrowid)
+
+    def get_market_exchange_records(self, limit: int = 100) -> list[MarketExchangeRecord]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                id, want_item, have_item,
+                want_item_match, have_item_match,
+                want_item_known, have_item_known,
+                want_item_is_currency, have_item_is_currency,
+                market_want_amount, market_have_amount,
+                user_want_amount, user_have_amount,
+                source, captured_at, confidence, raw_text, screenshot_path, note
+            FROM market_exchange_records
+            ORDER BY captured_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            MarketExchangeRecord(
+                id=int(row["id"]),
+                want_item=str(row["want_item"]),
+                have_item=str(row["have_item"]),
+                want_item_match=str(row["want_item_match"]),
+                have_item_match=str(row["have_item_match"]),
+                want_item_known=bool(row["want_item_known"]),
+                have_item_known=bool(row["have_item_known"]),
+                want_item_is_currency=bool(row["want_item_is_currency"]),
+                have_item_is_currency=bool(row["have_item_is_currency"]),
+                market_want_amount=float(row["market_want_amount"]),
+                market_have_amount=float(row["market_have_amount"]),
+                user_want_amount=float(row["user_want_amount"]),
+                user_have_amount=float(row["user_have_amount"]),
+                source=str(row["source"]),
+                captured_at=str(row["captured_at"]),
+                confidence=float(row["confidence"]),
+                raw_text=str(row["raw_text"]),
+                screenshot_path=str(row["screenshot_path"]),
+                note=str(row["note"]),
+            )
+            for row in rows
+        ]
+
+    def add_realtime_price_record(
+        self,
+        item_name: str,
+        side: str,
+        amount: float,
+        currency: str,
+        want_item: str = "",
+        have_item: str = "",
+        market_want_amount: float = 0,
+        market_have_amount: float = 0,
+        user_want_amount: float = 0,
+        user_have_amount: float = 0,
+        item_match: str = "",
+        item_known: bool = False,
+        source: str = "实时价格导入",
+        confidence: float = 0,
+        raw_text: str = "",
+        screenshot_path: str = "",
+        note: str = "",
+        mirror_to_price_records: bool = True,
+        remote_key: str = "",
+    ) -> int:
+        clean_item = item_name.strip()
+        clean_currency = canonical_currency(currency.strip())
+        clean_side = side.strip() or "未知"
+        clean_remote_key = remote_key.strip() or f"local:{uuid.uuid4().hex}"
+        cur = self.conn.execute(
+            """
+            INSERT INTO realtime_price_records(
+                item_name, item_match, item_known, side, amount, currency,
+                want_item, have_item, market_want_amount, market_have_amount,
+                user_want_amount, user_have_amount,
+                source, captured_at, confidence, raw_text, screenshot_path, note, remote_key
+            )
+            VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+            """,
+            (
+                clean_item,
+                item_match.strip(),
+                1 if item_known else 0,
+                clean_side,
+                float(amount),
+                clean_currency,
+                want_item.strip(),
+                have_item.strip(),
+                float(market_want_amount),
+                float(market_have_amount),
+                float(user_want_amount),
+                float(user_have_amount),
+                source.strip() or "实时价格导入",
+                utc_now(),
+                float(confidence),
+                raw_text,
+                screenshot_path,
+                note,
+                clean_remote_key,
+            ),
+        )
+        self.conn.commit()
+        realtime_id = int(cur.lastrowid)
+        if mirror_to_price_records and clean_item and float(amount) > 0 and clean_currency:
+            price_record_id = self.add_price_record(
+                clean_item,
+                float(amount),
+                clean_currency,
+                f"{source.strip() or '实时价格导入'}-{clean_side}",
+                confidence=confidence,
+                raw_text=raw_text,
+                screenshot_path=screenshot_path,
+                realtime_record_id=realtime_id,
+            )
+            self.conn.execute(
+                "UPDATE realtime_price_records SET mirrored_price_record_id = ? WHERE id = ?",
+                (price_record_id, realtime_id),
+            )
+            self.conn.commit()
+        return realtime_id
+
+    def get_realtime_price_records(self, limit: int = 100) -> list[RealtimePriceRecord]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                id, item_name, item_match, item_known, side, amount, currency,
+                want_item, have_item, market_want_amount, market_have_amount,
+                user_want_amount, user_have_amount,
+                source, captured_at, confidence, raw_text, screenshot_path, note,
+                upvotes, downvotes, mirrored_price_record_id, remote_key
+            FROM realtime_price_records
+            ORDER BY captured_at DESC, id DESC
+            LIMIT ?
+            """,
+            (limit,),
+        ).fetchall()
+        return [
+            RealtimePriceRecord(
+                id=int(row["id"]),
+                item_name=str(row["item_name"]),
+                item_match=str(row["item_match"]),
+                item_known=bool(row["item_known"]),
+                side=str(row["side"]),
+                amount=float(row["amount"]),
+                currency=str(row["currency"]),
+                want_item=str(row["want_item"]),
+                have_item=str(row["have_item"]),
+                market_want_amount=float(row["market_want_amount"]),
+                market_have_amount=float(row["market_have_amount"]),
+                user_want_amount=float(row["user_want_amount"]),
+                user_have_amount=float(row["user_have_amount"]),
+                source=str(row["source"]),
+                captured_at=str(row["captured_at"]),
+                confidence=float(row["confidence"]),
+                raw_text=str(row["raw_text"]),
+                screenshot_path=str(row["screenshot_path"]),
+                note=str(row["note"]),
+                upvotes=int(row["upvotes"] or 0),
+                downvotes=int(row["downvotes"] or 0),
+                mirrored_price_record_id=int(row["mirrored_price_record_id"] or 0),
+                remote_key=str(row["remote_key"] or ""),
+            )
+            for row in rows
+        ]
+
+    def get_realtime_price_record(self, record_id: int) -> RealtimePriceRecord | None:
+        row = self.conn.execute(
+            """
+            SELECT
+                id, item_name, item_match, item_known, side, amount, currency,
+                want_item, have_item, market_want_amount, market_have_amount,
+                user_want_amount, user_have_amount,
+                source, captured_at, confidence, raw_text, screenshot_path, note,
+                upvotes, downvotes, mirrored_price_record_id, remote_key
+            FROM realtime_price_records
+            WHERE id = ?
+            """,
+            (int(record_id),),
+        ).fetchone()
+        if row is None:
+            return None
+        return RealtimePriceRecord(
+            id=int(row["id"]),
+            item_name=str(row["item_name"]),
+            item_match=str(row["item_match"]),
+            item_known=bool(row["item_known"]),
+            side=str(row["side"]),
+            amount=float(row["amount"]),
+            currency=str(row["currency"]),
+            want_item=str(row["want_item"]),
+            have_item=str(row["have_item"]),
+            market_want_amount=float(row["market_want_amount"]),
+            market_have_amount=float(row["market_have_amount"]),
+            user_want_amount=float(row["user_want_amount"]),
+            user_have_amount=float(row["user_have_amount"]),
+            source=str(row["source"]),
+            captured_at=str(row["captured_at"]),
+            confidence=float(row["confidence"]),
+            raw_text=str(row["raw_text"]),
+            screenshot_path=str(row["screenshot_path"]),
+            note=str(row["note"]),
+            upvotes=int(row["upvotes"] or 0),
+            downvotes=int(row["downvotes"] or 0),
+            mirrored_price_record_id=int(row["mirrored_price_record_id"] or 0),
+            remote_key=str(row["remote_key"] or ""),
+        )
+
+    def upsert_synced_realtime_price_record(
+        self,
+        remote_key: str,
+        item_name: str,
+        side: str,
+        amount: float,
+        currency: str,
+        upvotes: int = 0,
+        want_item: str = "",
+        have_item: str = "",
+        market_want_amount: float = 0,
+        market_have_amount: float = 0,
+        user_want_amount: float = 0,
+        user_have_amount: float = 0,
+        item_match: str = "",
+        item_known: bool = False,
+        source: str = "实时价格导入",
+        captured_at: str = "",
+        confidence: float = 0,
+        raw_text: str = "",
+        screenshot_path: str = "",
+        note: str = "",
+    ) -> int:
+        clean_remote_key = remote_key.strip()
+        if not clean_remote_key:
+            raise ValueError("remote_key is required")
+        clean_item = item_name.strip()
+        clean_currency = canonical_currency(currency.strip())
+        clean_side = side.strip() or "未知"
+        clean_source = source.strip() or "实时价格导入"
+        clean_captured_at = captured_at.strip() or utc_now()
+        existing = self.conn.execute(
+            """
+            SELECT id, mirrored_price_record_id
+            FROM realtime_price_records
+            WHERE remote_key = ?
+            """,
+            (clean_remote_key,),
+        ).fetchone()
+        if existing is None:
+            realtime_id = self.add_realtime_price_record(
+                item_name=clean_item,
+                side=clean_side,
+                amount=float(amount),
+                currency=clean_currency,
+                want_item=want_item,
+                have_item=have_item,
+                market_want_amount=market_want_amount,
+                market_have_amount=market_have_amount,
+                user_want_amount=user_want_amount,
+                user_have_amount=user_have_amount,
+                item_match=item_match,
+                item_known=item_known,
+                source=clean_source,
+                confidence=confidence,
+                raw_text=raw_text,
+                screenshot_path=screenshot_path,
+                note=note,
+                mirror_to_price_records=False,
+                remote_key=clean_remote_key,
+            )
+            self.conn.execute(
+                """
+                UPDATE realtime_price_records
+                SET captured_at = ?, upvotes = ?, downvotes = 0
+                WHERE id = ?
+                """,
+                (clean_captured_at, max(0, int(upvotes or 0)), realtime_id),
+            )
+            price_record_id = 0
+        else:
+            realtime_id = int(existing["id"])
+            price_record_id = int(existing["mirrored_price_record_id"] or 0)
+            self.conn.execute(
+                """
+                UPDATE realtime_price_records
+                SET item_name = ?,
+                    item_match = ?,
+                    item_known = ?,
+                    side = ?,
+                    amount = ?,
+                    currency = ?,
+                    want_item = ?,
+                    have_item = ?,
+                    market_want_amount = ?,
+                    market_have_amount = ?,
+                    user_want_amount = ?,
+                    user_have_amount = ?,
+                    source = ?,
+                    captured_at = ?,
+                    confidence = ?,
+                    raw_text = ?,
+                    screenshot_path = ?,
+                    note = ?,
+                    upvotes = ?,
+                    downvotes = 0
+                WHERE id = ?
+                """,
+                (
+                    clean_item,
+                    item_match.strip(),
+                    1 if item_known else 0,
+                    clean_side,
+                    float(amount),
+                    clean_currency,
+                    want_item.strip(),
+                    have_item.strip(),
+                    float(market_want_amount),
+                    float(market_have_amount),
+                    float(user_want_amount),
+                    float(user_have_amount),
+                    clean_source,
+                    clean_captured_at,
+                    float(confidence),
+                    raw_text,
+                    screenshot_path,
+                    note,
+                    max(0, int(upvotes or 0)),
+                    realtime_id,
+                ),
+            )
+        if clean_item and float(amount) > 0 and clean_currency:
+            item_id = self.upsert_item(clean_item)
+            price_source = f"{clean_source}-{clean_side}"
+            if price_record_id > 0:
+                self.conn.execute(
+                    """
+                    UPDATE price_records
+                    SET item_id = ?,
+                        amount = ?,
+                        currency = ?,
+                        source = ?,
+                        captured_at = ?,
+                        confidence = ?,
+                        raw_text = ?,
+                        screenshot_path = ?,
+                        realtime_record_id = ?
+                    WHERE id = ?
+                    """,
+                    (
+                        item_id,
+                        float(amount),
+                        clean_currency,
+                        price_source,
+                        clean_captured_at,
+                        float(confidence),
+                        raw_text,
+                        screenshot_path,
+                        realtime_id,
+                        price_record_id,
+                    ),
+                )
+            else:
+                cur = self.conn.execute(
+                    """
+                    INSERT INTO price_records(
+                        item_id, amount, currency, source, captured_at,
+                        confidence, raw_text, screenshot_path, realtime_record_id
+                    )
+                    VALUES(?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        item_id,
+                        float(amount),
+                        clean_currency,
+                        price_source,
+                        clean_captured_at,
+                        float(confidence),
+                        raw_text,
+                        screenshot_path,
+                        realtime_id,
+                    ),
+                )
+                price_record_id = int(cur.lastrowid)
+                self.conn.execute(
+                    "UPDATE realtime_price_records SET mirrored_price_record_id = ? WHERE id = ?",
+                    (price_record_id, realtime_id),
+                )
+        self.conn.commit()
+        return realtime_id
+
+    def vote_realtime_price_record(self, record_id: int, vote: int) -> tuple[int, int]:
+        if record_id <= 0:
+            return 0, 0
+        if vote > 0:
+            self.conn.execute(
+                "UPDATE realtime_price_records SET upvotes = upvotes + 1 WHERE id = ?",
+                (int(record_id),),
+            )
+        self.conn.commit()
+        row = self.conn.execute(
+            "SELECT upvotes, downvotes FROM realtime_price_records WHERE id = ?",
+            (int(record_id),),
+        ).fetchone()
+        if row is None:
+            return 0, 0
+        return int(row["upvotes"] or 0), int(row["downvotes"] or 0)
+
+    def realtime_rating_score(self, record_id: int) -> int:
+        row = self.conn.execute(
+            "SELECT upvotes, downvotes FROM realtime_price_records WHERE id = ?",
+            (int(record_id),),
+        ).fetchone()
+        if row is None:
+            return 0
+        return int(row["upvotes"] or 0) - int(row["downvotes"] or 0)
+
+    def _latest_currency_quote(
+        self,
+        item_aliases: tuple[str, ...],
+        currency_aliases: tuple[str, ...],
+        source_prefix: str = "",
+    ) -> tuple[float, str, int] | None:
+        normalized_items = tuple(normalize_name(name) for name in item_aliases)
+        normalized_currencies = tuple(alias.strip().lower() for alias in currency_aliases)
+        if not normalized_items or not normalized_currencies:
+            return None
+        source_sql = "AND r.source LIKE ?" if source_prefix else ""
+        params: list[object] = [*normalized_items, *normalized_currencies]
+        if source_prefix:
+            params.append(f"{source_prefix}%")
+        row = self.conn.execute(
+            f"""
+            SELECT r.amount, r.captured_at, r.id
+            FROM price_records r
+            JOIN items i ON i.id = r.item_id
+            WHERE i.normalized_name IN ({",".join("?" for _ in normalized_items)})
+              AND lower(trim(r.currency)) IN ({",".join("?" for _ in normalized_currencies)})
+              AND r.amount > 0
+              {source_sql}
+            ORDER BY r.captured_at DESC, r.id DESC
+            LIMIT 1
+            """,
+            tuple(params),
+        ).fetchone()
+        if row is None:
+            return None
+        return float(row["amount"]), str(row["captured_at"]), int(row["id"])
+
     def get_exalted_per_divine(self) -> float:
-        for name in ("神圣石", "Divine Orb"):
-            stats = self.get_stats(name)
-            if stats and stats.latest_amount > 0 and canonical_currency(stats.latest_currency) == "崇高石":
-                return stats.latest_amount
+        divine_aliases = ("神圣石", "Divine Orb", "divine")
+        exalted_aliases = ("崇高石", "Exalted Orb", "exalt", "exalted")
+        for source_prefix in ("poe2db-", ""):
+            candidates: list[tuple[str, int, float]] = []
+            direct = self._latest_currency_quote(divine_aliases, exalted_aliases, source_prefix)
+            if direct is not None:
+                amount, captured_at, record_id = direct
+                candidates.append((captured_at, record_id, amount))
+            inverse = self._latest_currency_quote(exalted_aliases, divine_aliases, source_prefix)
+            if inverse is not None:
+                amount, captured_at, record_id = inverse
+                candidates.append((captured_at, record_id, 1.0 / amount))
+            if candidates:
+                candidates.sort(reverse=True)
+                return candidates[0][2]
         return 160.0
 
-    def get_price_history(self, item_name: str, limit: int = 20) -> list[PriceRecord]:
-        rows = self.get_recent_records(item_name, limit)
+    def get_chaos_per_divine(self) -> float:
+        divine_aliases = ("神圣石", "Divine Orb", "divine")
+        exalted_aliases = ("崇高石", "Exalted Orb", "exalt", "exalted")
+        chaos_aliases = ("混沌石", "Chaos Orb", "chaos")
+        exalted_per_divine = self.get_exalted_per_divine()
+        for source_prefix in ("poe2db-", ""):
+            candidates: list[tuple[str, int, float]] = []
+            direct = self._latest_currency_quote(divine_aliases, chaos_aliases, source_prefix)
+            if direct is not None:
+                amount, captured_at, record_id = direct
+                candidates.append((captured_at, record_id, amount))
+            inverse = self._latest_currency_quote(chaos_aliases, divine_aliases, source_prefix)
+            if inverse is not None:
+                amount, captured_at, record_id = inverse
+                candidates.append((captured_at, record_id, 1.0 / amount))
+            direct_exalted = self._latest_currency_quote(exalted_aliases, chaos_aliases, source_prefix)
+            if direct_exalted is not None:
+                amount, captured_at, record_id = direct_exalted
+                candidates.append((captured_at, record_id, amount * exalted_per_divine))
+            inverse_exalted = self._latest_currency_quote(chaos_aliases, exalted_aliases, source_prefix)
+            if inverse_exalted is not None:
+                amount, captured_at, record_id = inverse_exalted
+                candidates.append((captured_at, record_id, exalted_per_divine / amount))
+            if candidates:
+                candidates.sort(reverse=True)
+                return candidates[0][2]
+        return 10.0
+
+    def get_price_history(
+        self,
+        item_name: str,
+        limit: int = 20,
+        min_realtime_upvotes: int = 0,
+        prefer_realtime_if_available: bool = False,
+    ) -> list[PriceRecord]:
+        rows = self.get_recent_records(
+            item_name,
+            limit,
+            min_realtime_upvotes=min_realtime_upvotes,
+            prefer_realtime_if_available=prefer_realtime_if_available,
+        )
         return list(reversed(rows))
 
     def set_favorite(self, item_name: str, favorite: bool) -> None:
@@ -731,16 +1739,38 @@ class PriceDatabase:
         if row is None:
             return
         item_id = int(row["id"])
+        realtime_ids = [
+            int(record["realtime_record_id"])
+            for record in self.conn.execute(
+                "SELECT realtime_record_id FROM price_records WHERE item_id = ? AND realtime_record_id > 0",
+                (item_id,),
+            ).fetchall()
+        ]
         self.conn.execute("DELETE FROM favorites WHERE item_id = ?", (item_id,))
         self.conn.execute("DELETE FROM pinned_items WHERE item_id = ?", (item_id,))
         self.conn.execute("DELETE FROM price_records WHERE item_id = ?", (item_id,))
         self.conn.execute("DELETE FROM items WHERE id = ?", (item_id,))
+        if realtime_ids:
+            self.conn.execute(
+                f"DELETE FROM realtime_price_records WHERE id IN ({','.join('?' for _ in realtime_ids)})",
+                tuple(realtime_ids),
+            )
+        self.conn.execute(
+            """
+            DELETE FROM realtime_price_records
+            WHERE lower(trim(item_name)) = ?
+               OR lower(trim(item_match)) = ?
+            """,
+            (normalized, normalized),
+        )
         self.conn.commit()
 
     def clear_all_data(self) -> None:
         self.conn.execute("DELETE FROM favorites")
         self.conn.execute("DELETE FROM pinned_items")
         self.conn.execute("DELETE FROM price_records")
+        self.conn.execute("DELETE FROM realtime_price_records")
+        self.conn.execute("DELETE FROM market_exchange_records")
         self.conn.execute("DELETE FROM items")
         self.conn.commit()
 
@@ -773,16 +1803,40 @@ def canonical_currency(currency: str) -> str:
         return "崇高石"
     if value in {"divine orb", "divine", "神圣", "神圣石"}:
         return "神圣石"
+    if value in {"chaos orb", "chaos", "混沌", "混沌石"}:
+        return "混沌石"
     return currency
 
 
-def convert_amount(amount: float, source_currency: str, target_currency: str, exalted_per_divine: float) -> float:
+def convert_amount(
+    amount: float,
+    source_currency: str,
+    target_currency: str,
+    exalted_per_divine: float,
+    chaos_per_divine: float = 0,
+) -> float:
     source = canonical_currency(source_currency)
     target = canonical_currency(target_currency)
     if source == target:
         return amount
-    if source == "神圣石" and target == "崇高石":
-        return amount * exalted_per_divine
-    if source == "崇高石" and target == "神圣石":
-        return amount / exalted_per_divine
+    values_in_divine = {"神圣石": 1.0, "崇高石": 1.0 / max(0.000001, exalted_per_divine)}
+    if chaos_per_divine:
+        values_in_divine["混沌石"] = 1.0 / max(0.000001, chaos_per_divine)
+    if source in values_in_divine and target in values_in_divine:
+        return amount * values_in_divine[source] / values_in_divine[target]
     return amount
+
+
+def display_amount_for_item(
+    item_name: str,
+    amount: float,
+    source_currency: str,
+    target_currency: str,
+    exalted_per_divine: float,
+    chaos_per_divine: float = 0,
+) -> float:
+    item_currency = canonical_currency(item_name)
+    target = canonical_currency(target_currency)
+    if item_currency in {"神圣石", "崇高石", "混沌石"} and target in {"神圣石", "崇高石", "混沌石"}:
+        return convert_amount(1.0, item_currency, target, exalted_per_divine, chaos_per_divine)
+    return convert_amount(amount, source_currency, target_currency, exalted_per_divine, chaos_per_divine)

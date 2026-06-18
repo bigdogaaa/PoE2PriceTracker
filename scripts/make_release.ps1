@@ -6,38 +6,24 @@ param(
 
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
-$ExePath = Join-Path $Root "dist\$AppName.exe"
-$FolderPath = Join-Path $Root "dist\$AppName"
+$ExePath = Join-Path $Root "dist\$AppName-$Version.exe"
+$LegacyExePath = Join-Path $Root "dist\$AppName.exe"
 $ReleaseDir = Join-Path $Root "release"
-$ZipPath = Join-Path $ReleaseDir "PoE2PriceTracker-$Version.zip"
 
-if ((-not (Test-Path $ExePath)) -and (-not (Test-Path $FolderPath))) {
+if (-not (Test-Path $ExePath)) {
+    $ExePath = $LegacyExePath
+}
+if (-not (Test-Path $ExePath)) {
     throw "Build output not found. Run scripts\build.ps1 first."
 }
 
 New-Item -ItemType Directory -Force -Path $ReleaseDir | Out-Null
-if (Test-Path $ZipPath) {
-    try {
-        Remove-Item -LiteralPath $ZipPath -Force
-    }
-    catch {
-        $Stamp = Get-Date -Format "yyyyMMdd-HHmmss"
-        $ZipPath = Join-Path $ReleaseDir "PoE2PriceTracker-$Version-$Stamp.zip"
-        Write-Warning "Could not replace existing zip. Writing timestamped release: $ZipPath"
-    }
-}
+$Hash = (Get-FileHash $ExePath -Algorithm SHA256).Hash.ToLowerInvariant()
 
-if (Test-Path $FolderPath) {
-    Compress-Archive -Path (Join-Path $FolderPath "*") -DestinationPath $ZipPath
-}
-else {
-    Compress-Archive -Path $ExePath -DestinationPath $ZipPath
-}
-$Hash = (Get-FileHash $ZipPath -Algorithm SHA256).Hash.ToLowerInvariant()
-
-$DownloadUrl = (Resolve-Path $ZipPath).Path
+$AssetName = Split-Path -Leaf $ExePath
+$DownloadUrl = $AssetName
 if ($DownloadBaseUrl.Trim()) {
-    $DownloadUrl = $DownloadBaseUrl.TrimEnd("/") + "/" + (Split-Path -Leaf $ZipPath)
+    $DownloadUrl = $DownloadBaseUrl.TrimEnd("/") + "/" + $AssetName
 }
 
 $Manifest = @{
@@ -49,5 +35,5 @@ $Manifest = @{
 $ManifestPath = Join-Path $ReleaseDir "latest.json"
 $Manifest | Set-Content -Path $ManifestPath -Encoding UTF8
 
-Write-Host "Release zip: $ZipPath"
+Write-Host "Release exe: $ExePath"
 Write-Host "Manifest: $ManifestPath"

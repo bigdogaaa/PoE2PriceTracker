@@ -153,6 +153,8 @@ def _currency_from_href(href: str) -> str:
         return "神圣石"
     if "Economy_exalted" in href:
         return "崇高石"
+    if "Economy_chaos" in href:
+        return "混沌石"
     name = href.rsplit("/", 1)[-1].replace("Economy_", "")
     return unescape(name.replace("_", " "))
 

@@ -106,6 +106,12 @@ if (Test-Path $AssetBundle) {
     Write-Host "Including bundled assets: $AssetBundle"
 }
 
+$StaticBundle = Join-Path $Root "static"
+if (Test-Path $StaticBundle) {
+    $PyInstallerArgs = $PyInstallerArgs[0..($PyInstallerArgs.Length - 2)] + @("--add-data", "static;static") + $PyInstallerArgs[($PyInstallerArgs.Length - 1)]
+    Write-Host "Including static assets: $StaticBundle"
+}
+
 Invoke-Checked $BuildPython $PyInstallerArgs
 
 $BuiltPath = Join-Path $Root "dist\$BuildName.exe"
