@@ -1399,6 +1399,41 @@ class PriceDatabase:
             remote_key=str(row["remote_key"] or ""),
         )
 
+    def get_realtime_remote_signatures(self) -> dict[str, tuple[object, ...]]:
+        rows = self.conn.execute(
+            """
+            SELECT
+                remote_key, item_name, item_match, item_known, side, amount, currency,
+                want_item, have_item, market_want_amount, market_have_amount,
+                user_want_amount, user_have_amount, source, captured_at, confidence,
+                note, upvotes
+            FROM realtime_price_records
+            WHERE remote_key <> ''
+            """
+        ).fetchall()
+        return {
+            str(row["remote_key"]): (
+                str(row["item_name"]),
+                str(row["item_match"]),
+                int(row["item_known"] or 0),
+                str(row["side"]),
+                round(float(row["amount"]), 8),
+                canonical_currency(str(row["currency"])),
+                str(row["want_item"]),
+                str(row["have_item"]),
+                round(float(row["market_want_amount"]), 8),
+                round(float(row["market_have_amount"]), 8),
+                round(float(row["user_want_amount"]), 8),
+                round(float(row["user_have_amount"]), 8),
+                str(row["source"]),
+                str(row["captured_at"]),
+                round(float(row["confidence"]), 8),
+                str(row["note"]),
+                max(0, int(row["upvotes"] or 0)),
+            )
+            for row in rows
+        }
+
     def upsert_synced_realtime_price_record(
         self,
         remote_key: str,
@@ -1611,24 +1646,145 @@ class PriceDatabase:
         item_aliases: tuple[str, ...],
         currency_aliases: tuple[str, ...],
     ) -> list[tuple[float, str, int]]:
+        return [
+            (amount, captured_at, record_id)
+            for amount, captured_at, record_id, _source, _realtime_id, _upvotes, _downvotes in self._currency_quote_rows(
+                item_aliases,
+                currency_aliases,
+            )
+        ]
+
+    def _currency_quote_rows(
+        self,
+        item_aliases: tuple[str, ...],
+        currency_aliases: tuple[str, ...],
+        min_realtime_upvotes: int = 0,
+    ) -> list[tuple[float, str, int, str, int, int, int]]:
         normalized_items = tuple(normalize_name(name) for name in item_aliases)
         normalized_currencies = tuple(alias.strip().lower() for alias in currency_aliases)
         if not normalized_items or not normalized_currencies:
             return []
-        params: list[object] = [*normalized_items, *normalized_currencies]
+        min_upvotes = max(0, int(min_realtime_upvotes or 0))
+        params: list[object] = [*normalized_items, *normalized_currencies, min_upvotes]
         rows = self.conn.execute(
             f"""
-            SELECT r.amount, r.captured_at, r.id
+            SELECT
+                r.amount,
+                r.captured_at,
+                r.id,
+                r.source,
+                r.realtime_record_id,
+                COALESCE(rp.upvotes, 0) AS upvotes,
+                COALESCE(rp.downvotes, 0) AS downvotes
             FROM price_records r
             JOIN items i ON i.id = r.item_id
+            LEFT JOIN realtime_price_records rp ON rp.id = r.realtime_record_id
             WHERE i.normalized_name IN ({",".join("?" for _ in normalized_items)})
               AND lower(trim(r.currency)) IN ({",".join("?" for _ in normalized_currencies)})
               AND r.amount > 0
+              AND (r.realtime_record_id = 0 OR COALESCE(rp.upvotes, 0) >= ?)
             ORDER BY r.captured_at DESC, r.id DESC
             """,
             tuple(params),
         ).fetchall()
-        return [(float(row["amount"]), str(row["captured_at"]), int(row["id"])) for row in rows]
+        return [
+            (
+                float(row["amount"]),
+                str(row["captured_at"]),
+                int(row["id"]),
+                str(row["source"]),
+                int(row["realtime_record_id"] or 0),
+                int(row["upvotes"] or 0),
+                int(row["downvotes"] or 0),
+            )
+            for row in rows
+        ]
+
+    @staticmethod
+    def _base_currency_aliases(currency: str) -> tuple[str, ...]:
+        value = canonical_currency(currency)
+        if value == "神圣石":
+            return ("神圣石", "Divine Orb", "divine")
+        if value == "崇高石":
+            return ("崇高石", "Exalted Orb", "exalt", "exalted")
+        if value == "混沌石":
+            return ("混沌石", "Chaos Orb", "chaos")
+        return ()
+
+    @staticmethod
+    def _valid_base_currency_pair_amount(source_currency: str, target_currency: str, amount: float) -> bool:
+        if amount <= 0:
+            return False
+        source = canonical_currency(source_currency)
+        target = canonical_currency(target_currency)
+        if {source, target} == {"神圣石", "崇高石"}:
+            divine_to_exalted = amount if source == "神圣石" else 1.0 / amount
+            return 10 <= divine_to_exalted <= 1000
+        return True
+
+    def get_base_currency_pair_stats(
+        self,
+        item_currency: str,
+        target_currency: str,
+        min_realtime_upvotes: int = 0,
+    ) -> PriceStats | None:
+        source = canonical_currency(item_currency)
+        target = canonical_currency(target_currency)
+        base_currencies = {"神圣石", "崇高石", "混沌石"}
+        if source not in base_currencies or target not in base_currencies:
+            return None
+        if source == target:
+            return PriceStats(
+                item_name=source,
+                count=1,
+                latest_amount=1.0,
+                latest_currency=target,
+                latest_at="",
+                min_amount=1.0,
+                max_amount=1.0,
+                avg_amount=1.0,
+                latest_source="基础通货兑换",
+            )
+
+        source_aliases = self._base_currency_aliases(source)
+        target_aliases = self._base_currency_aliases(target)
+        candidates: list[tuple[str, int, float, str, int, int, int]] = []
+
+        for amount, captured_at, record_id, quote_source, realtime_id, upvotes, downvotes in self._currency_quote_rows(
+            source_aliases,
+            target_aliases,
+            min_realtime_upvotes=min_realtime_upvotes,
+        ):
+            if self._valid_base_currency_pair_amount(source, target, amount):
+                candidates.append((captured_at, record_id, amount, quote_source, realtime_id, upvotes, downvotes))
+
+        for amount, captured_at, record_id, quote_source, realtime_id, upvotes, downvotes in self._currency_quote_rows(
+            target_aliases,
+            source_aliases,
+            min_realtime_upvotes=min_realtime_upvotes,
+        ):
+            converted = 1.0 / amount
+            if self._valid_base_currency_pair_amount(source, target, converted):
+                candidates.append((captured_at, record_id, converted, quote_source, realtime_id, upvotes, downvotes))
+
+        if not candidates:
+            return None
+        captured_at, record_id, amount, quote_source, realtime_id, upvotes, downvotes = sorted(candidates, reverse=True)[0]
+        return PriceStats(
+            item_name=source,
+            count=len(candidates),
+            latest_amount=amount,
+            latest_currency=target,
+            latest_at=captured_at,
+            min_amount=amount,
+            max_amount=amount,
+            avg_amount=amount,
+            latest_source=quote_source,
+            latest_record_id=record_id,
+            realtime_record_id=realtime_id,
+            realtime_upvotes=upvotes,
+            realtime_downvotes=downvotes,
+        )
 
     def get_exalted_per_divine(self) -> float:
         divine_aliases = ("神圣石", "Divine Orb", "divine")

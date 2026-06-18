@@ -1,7 +1,8 @@
 param(
     [string]$Version = "0.1.0",
     [string]$AppName = "PoE2PriceTracker",
-    [string]$DownloadBaseUrl = ""
+    [string]$DownloadBaseUrl = "",
+    [string[]]$Notes = @()
 )
 
 $ErrorActionPreference = "Stop"
@@ -28,8 +29,14 @@ if ($DownloadBaseUrl.Trim()) {
 
 $Manifest = @{
     version = $Version
+    channel = "stable"
+    url = $DownloadUrl
     download_url = $DownloadUrl
     sha256 = $Hash
+    size = (Get-Item $ExePath).Length
+    release_date = (Get-Date -Format "yyyy-MM-dd")
+    notes = $Notes
+    mandatory = $false
 } | ConvertTo-Json
 
 $ManifestPath = Join-Path $ReleaseDir "latest.json"

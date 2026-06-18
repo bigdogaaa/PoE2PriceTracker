@@ -9,7 +9,9 @@ from typing import Any
 
 APP_DIR_NAME = "PoE2PriceTracker"
 GITHUB_RELEASE_BASE = "https://github.com/bigdogaaa/PoE2PriceTracker/releases"
-UPDATE_MANIFEST_URL = f"{GITHUB_RELEASE_BASE}/latest/download/latest.json"
+GITHUB_UPDATE_MANIFEST_URL = f"{GITHUB_RELEASE_BASE}/latest/download/latest.json"
+QINIU_UPDATE_MANIFEST_URL = "http://tgu7052fc.hb-bkt.clouddn.com/poe2-price-tracker/latest.json"
+UPDATE_MANIFEST_URL = f"{QINIU_UPDATE_MANIFEST_URL}\n{GITHUB_UPDATE_MANIFEST_URL}"
 LEGACY_RELEASE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker-release/releases/download"
 LEGACY_SOURCE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download"
 
@@ -51,6 +53,7 @@ class AppConfig:
     show_ocr_review_details: bool = True
     realtime_min_upvotes: int = 0
     price_share_service_url: str = "http://117.50.51.78:8787"
+    auto_check_updates: bool = True
     minimize_action: str = "ask"
     close_action: str = "ask"
     visible_columns: list[str] = field(
@@ -159,6 +162,7 @@ def load_config() -> AppConfig:
     )
     if (
         not loaded.update_manifest.strip()
+        or loaded.update_manifest.strip() == GITHUB_UPDATE_MANIFEST_URL
         or LEGACY_SOURCE_REPO_DOWNLOAD_BASE in loaded.update_manifest
         or LEGACY_RELEASE_REPO_DOWNLOAD_BASE in loaded.update_manifest
     ):

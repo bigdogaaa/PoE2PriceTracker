@@ -223,6 +223,12 @@ def hash_items(value: Any) -> dict[str, str]:
     return result
 
 
+def scan_items(value: Any) -> tuple[str, dict[str, str]]:
+    if not isinstance(value, list) or len(value) < 2:
+        return "0", {}
+    return str(value[0] or "0"), hash_items(value[1])
+
+
 def clean_text(value: Any, max_len: int) -> str:
     return " ".join(str(value or "").strip().split())[:max_len]
 
@@ -330,14 +336,74 @@ class Handler(BaseHTTPRequestHandler):
         client_ip = self._client_key()
         try:
             access_log(f"GET {self.path} from {client_ip}")
-            if self.path == "/health":
+            parsed_url = urllib.parse.urlparse(self.path)
+            path = parsed_url.path
+            if path == "/health":
                 self._send_json(HTTPStatus.OK, {"ok": True})
-                audit_log("access", {"ip": client_ip, "method": "GET", "path": self.path, "status": 200})
+                audit_log("access", {"ip": client_ip, "method": "GET", "path": path, "status": 200})
                 return
-            if self.path == "/v1/realtime/records":
+            if path == "/v1/realtime/records":
                 if not SYNC_LIMITER.allow(client_ip):
                     self._send_json(HTTPStatus.TOO_MANY_REQUESTS, {"ok": False, "error": "too many sync requests"})
-                    audit_log("access", {"ip": client_ip, "method": "GET", "path": self.path, "status": 429})
+                    audit_log("access", {"ip": client_ip, "method": "GET", "path": path, "status": 429})
+                    return
+                query = urllib.parse.parse_qs(parsed_url.query)
+                if query:
+                    cursor = clean_text(query.get("cursor", ["0"])[0], 32) or "0"
+                    try:
+                        limit = int(query.get("limit", ["500"])[0])
+                    except (TypeError, ValueError):
+                        limit = 500
+                    limit = max(50, min(1000, limit))
+                    scan_results = UPSTASH.pipeline(
+                        [["HSCAN", RECORDS_HASH, cursor, "COUNT", str(limit)]],
+                        read_only=True,
+                    )
+                    next_cursor, records = scan_items(scan_results[0] if scan_results else [])
+                    keys = list(records.keys())
+                    upvote_values: list[Any] = []
+                    if keys:
+                        upvote_results = UPSTASH.pipeline([["HMGET", UPVOTES_HASH, *keys]], read_only=True)
+                        raw_upvotes = upvote_results[0] if upvote_results else []
+                        if isinstance(raw_upvotes, list):
+                            upvote_values = raw_upvotes
+                    upvotes = {
+                        key: "0" if value is None else str(value)
+                        for key, value in zip(keys, upvote_values)
+                    }
+                    payload: list[dict[str, Any]] = []
+                    for remote_key, item in records.items():
+                        try:
+                            record = json.loads(item)
+                            if not isinstance(record, dict):
+                                continue
+                            record.setdefault("k", remote_key)
+                            record["u"] = max(0, int(upvotes.get(remote_key, "0") or 0))
+                            payload.append(record)
+                        except Exception:
+                            continue
+                    self._send_json(
+                        HTTPStatus.OK,
+                        {
+                            "ok": True,
+                            "records": payload,
+                            "next_cursor": next_cursor,
+                            "complete": next_cursor == "0",
+                            "scanned": len(records),
+                        },
+                    )
+                    audit_log(
+                        "access",
+                        {
+                            "ip": client_ip,
+                            "method": "GET",
+                            "path": path,
+                            "status": 200,
+                            "records": len(payload),
+                            "cursor": cursor,
+                            "next_cursor": next_cursor,
+                        },
+                    )
                     return
                 results = UPSTASH.pipeline([["HGETALL", RECORDS_HASH], ["HGETALL", UPVOTES_HASH]], read_only=True)
                 records = hash_items(results[0] if results else {})
@@ -348,6 +414,7 @@ class Handler(BaseHTTPRequestHandler):
                         record = json.loads(item)
                         if not isinstance(record, dict):
                             continue
+                        record.setdefault("k", remote_key)
                         record["u"] = max(0, int(upvotes.get(remote_key, "0") or 0))
                         payload.append(record)
                     except Exception:
@@ -355,11 +422,11 @@ class Handler(BaseHTTPRequestHandler):
                 self._send_json(HTTPStatus.OK, {"ok": True, "records": payload})
                 audit_log(
                     "access",
-                    {"ip": client_ip, "method": "GET", "path": self.path, "status": 200, "records": len(payload)},
+                    {"ip": client_ip, "method": "GET", "path": path, "status": 200, "records": len(payload)},
                 )
                 return
             self._send_json(HTTPStatus.NOT_FOUND, {"ok": False, "error": "not found"})
-            audit_log("access", {"ip": client_ip, "method": "GET", "path": self.path, "status": 404})
+            audit_log("access", {"ip": client_ip, "method": "GET", "path": path, "status": 404})
         except Exception as exc:
             audit_log(
                 "access",

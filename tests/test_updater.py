@@ -1,0 +1,106 @@
+import hashlib
+import json
+import shutil
+import uuid
+from pathlib import Path
+
+from poe2_price_tracker import updater
+
+
+def _tmp_dir() -> Path:
+    path = Path(f".tmp-updater-{uuid.uuid4().hex}")
+    path.mkdir()
+    return path
+
+
+def test_check_update_accepts_qiniu_manifest_fields(monkeypatch):
+    tmp_path = _tmp_dir()
+    monkeypatch.setattr(updater, "__version__", "1.0.0")
+    try:
+        package = tmp_path / "PoE2PriceTracker-9.9.9.exe"
+        package.write_bytes(b"test package")
+        manifest = tmp_path / "latest.json"
+        manifest.write_text(
+            json.dumps(
+                {
+                    "version": "9.9.9",
+                    "url": package.name,
+                    "sha256": hashlib.sha256(package.read_bytes()).hexdigest(),
+                    "size": package.stat().st_size,
+                    "notes": ["qiniu source"],
+                }
+            ),
+            encoding="utf-8",
+        )
+
+        info = updater.check_update(str(manifest))
+
+        assert info.available
+        assert info.download_url == package.name
+        assert info.manifest_location == str(manifest)
+        assert info.size == package.stat().st_size
+        assert info.notes == ("qiniu source",)
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_check_update_falls_back_to_second_manifest(monkeypatch):
+    tmp_path = _tmp_dir()
+    monkeypatch.setattr(updater, "__version__", "1.0.0")
+    try:
+        good = tmp_path / "latest.json"
+        good.write_text(json.dumps({"version": "2.0.0", "download_url": "app.exe"}), encoding="utf-8")
+        missing = tmp_path / "missing.json"
+
+        info = updater.check_update(f"{missing}\n{good}")
+
+        assert info.available
+        assert info.latest_version == "2.0.0"
+        assert info.manifest_location == str(good)
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_check_update_accepts_utf8_sig_manifest(monkeypatch):
+    tmp_path = _tmp_dir()
+    monkeypatch.setattr(updater, "__version__", "1.0.0")
+    try:
+        manifest = tmp_path / "latest.json"
+        manifest.write_text(
+            "\ufeff" + json.dumps({"version": "2.0.0", "download_url": "app.exe"}),
+            encoding="utf-8",
+        )
+
+        info = updater.check_update(str(manifest))
+
+        assert info.available
+        assert info.latest_version == "2.0.0"
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_download_update_checks_size_and_sha256():
+    tmp_path = _tmp_dir()
+    try:
+        package = tmp_path / "PoE2PriceTracker-2.0.0.exe"
+        package.write_bytes(b"binary")
+        digest = hashlib.sha256(package.read_bytes()).hexdigest()
+        manifest = tmp_path / "latest.json"
+        manifest.write_text(json.dumps({"version": "2.0.0", "download_url": package.name}), encoding="utf-8")
+        info = updater.UpdateInfo(
+            True,
+            "1.0.0",
+            "2.0.0",
+            package.name,
+            digest,
+            "",
+            str(manifest),
+            package.stat().st_size,
+        )
+
+        result = updater.download_update(str(manifest), info, tmp_path / "updates")
+
+        assert result.executable_path is not None
+        assert result.executable_path.name == package.name
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)

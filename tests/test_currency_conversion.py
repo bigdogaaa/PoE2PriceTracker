@@ -139,6 +139,43 @@ def test_divine_rate_uses_latest_valid_inverse_base_currency_quote():
         db.close()
 
 
+def test_base_currency_pair_stats_uses_latest_inverse_quote():
+    db = PriceDatabase(Path(":memory:"))
+    try:
+        db.add_price_record(
+            "崇高石",
+            1 / 181,
+            "神圣石",
+            "实时价格导入-买入",
+            captured_at="2026-01-02T00:00:00+00:00",
+        )
+
+        stats = db.get_base_currency_pair_stats("神圣石", "崇高石")
+
+        assert stats is not None
+        assert round(stats.latest_amount) == 181
+        assert stats.latest_currency == "崇高石"
+        assert stats.latest_source == "实时价格导入-买入"
+    finally:
+        db.close()
+
+
+def test_base_currency_pair_stats_rejects_invalid_divine_exalted_noise():
+    db = PriceDatabase(Path(":memory:"))
+    try:
+        db.add_price_record(
+            "神圣石",
+            1,
+            "崇高石",
+            "实时价格导入-卖出",
+            captured_at="2026-01-02T00:00:00+00:00",
+        )
+
+        assert db.get_base_currency_pair_stats("神圣石", "崇高石") is None
+    finally:
+        db.close()
+
+
 def test_chaos_rate_uses_latest_base_currency_quotes_across_three_currencies():
     db = PriceDatabase(Path(":memory:"))
     try:

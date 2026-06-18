@@ -160,9 +160,63 @@ https://poe2db.tw/cn/Economy
 
 https://github.com/bigdogaaa/PoE2PriceTracker/releases/latest
 
-当前版本：`0.4.1`
+当前版本：`0.4.2`
 
-如果你只是使用软件，下载 release 中的 `PoE2PriceTracker-0.4.1.exe` 即可。
+如果你只是使用软件，下载 release 中的 `PoE2PriceTracker-0.4.2.exe` 即可。
+
+## 七牛云更新源
+
+软件更新支持配置多个更新清单地址，按顺序尝试。推荐将七牛云 Kodo 作为国内主更新源，GitHub Release 作为备用源。
+
+七牛云空间建议使用公开读 Bucket。当前更新 CDN 域名为：
+
+```text
+http://tgu7052fc.hb-bkt.clouddn.com
+```
+
+该域名当前 HTTPS 证书不匹配，因此默认使用 HTTP；更新包会通过 SHA256 校验。后续如果绑定了自定义 HTTPS 域名，只需要替换更新地址和发布脚本里的 `QINIU_DOMAIN`。
+
+对象路径建议为：
+
+```text
+poe2-price-tracker/latest.json
+poe2-price-tracker/releases/0.4.2/PoE2PriceTracker-0.4.2.exe
+poe2-price-tracker/releases/0.4.2/latest.json
+```
+
+`latest.json` 示例：
+
+```json
+{
+  "version": "0.4.2",
+  "channel": "stable",
+  "url": "http://tgu7052fc.hb-bkt.clouddn.com/poe2-price-tracker/releases/0.4.2/PoE2PriceTracker-0.4.2.exe",
+  "download_url": "http://tgu7052fc.hb-bkt.clouddn.com/poe2-price-tracker/releases/0.4.2/PoE2PriceTracker-0.4.2.exe",
+  "sha256": "...",
+  "size": 105504874,
+  "release_date": "2026-06-19",
+  "notes": ["更新说明"],
+  "mandatory": false
+}
+```
+
+发布到七牛云前，先安装发布脚本依赖：
+
+```powershell
+python -m pip install -r requirements-release.txt
+```
+
+设置本机环境变量后发布：
+
+```powershell
+$env:QINIU_ACCESS_KEY="你的 AccessKey"
+$env:QINIU_SECRET_KEY="你的 SecretKey"
+$env:QINIU_BUCKET="你的 Bucket"
+$env:QINIU_DOMAIN="http://tgu7052fc.hb-bkt.clouddn.com"
+python scripts\publish_qiniu.py --version 0.4.2 --overwrite --notes "更新说明"
+```
+
+客户端默认更新地址为七牛 `latest.json` + GitHub 备用源，也可以在配置页中一行一个地址填写多个源；程序会先尝试七牛，失败后再尝试后续源。
 
 ## 数据说明
 
@@ -233,6 +287,16 @@ https://github.com/bigdogaaa/PoE2PriceTracker/releases/latest
 若用户希望删除本软件产生的本地数据，可通过软件设置、清理缓存、删除配置文件或卸载软件等方式处理。
 
 ## 更新说明
+
+### 2026-06-19 v0.4.2
+
+- 新增自动更新能力，支持七牛云 Kodo/CDN 作为主更新源，并保留 GitHub Release 作为备用更新源。
+- 配置页新增可排序更新地址列表和启动后自动检查更新开关，更新清单支持 UTF-8 BOM、SHA256 与大小校验。
+- 左上版本号后新增更新状态提示：检查中、有更新、最新版或检查失败。
+- 优化实时价格同步：本地按页增量处理远端数据，跳过未变化记录，减少 Redis/本地数据库读写并降低单次同步失败风险。
+- 实时价格导入确认框支持对已有历史实时价格直接点赞，价格对比单位会跟随截图识别到的基础通货单位。
+- 基础通货互查改为读取最新有效两两兑换比例，支持神圣石、混沌石、崇高石之间的正向和反向报价。
+- 修复 F4 快速查价卡片中点赞票数出现在趋势下方、看起来像多余数字的显示问题。
 
 ### 2026-06-18 v0.4.1
 

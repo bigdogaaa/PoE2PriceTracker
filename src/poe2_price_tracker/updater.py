@@ -20,6 +20,9 @@ class UpdateInfo:
     download_url: str
     sha256: str
     message: str
+    manifest_location: str = ""
+    size: int = 0
+    notes: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -33,10 +36,24 @@ class DownloadedUpdate:
 def _read_manifest(location: str) -> dict:
     if location.startswith(("http://", "https://")):
         with urllib.request.urlopen(location, timeout=12) as response:
-            return json.loads(response.read().decode("utf-8"))
+            return json.loads(response.read().decode("utf-8-sig"))
     path = Path(location)
-    with path.open("r", encoding="utf-8") as fh:
+    with path.open("r", encoding="utf-8-sig") as fh:
         return json.load(fh)
+
+
+def _manifest_locations(value: str) -> list[str]:
+    locations: list[str] = []
+    for line in value.replace(",", "\n").replace(";", "\n").splitlines():
+        location = line.strip()
+        if location:
+            locations.append(location)
+    return locations
+
+
+def _manifest_payload(manifest: dict) -> dict:
+    payload = manifest.get("payload", manifest)
+    return payload if isinstance(payload, dict) else manifest
 
 
 def _version_tuple(version: str) -> tuple[int, ...]:
@@ -93,29 +110,49 @@ def _find_executable(root: Path) -> Path | None:
 
 
 def check_update(manifest_location: str) -> UpdateInfo:
-    if not manifest_location.strip():
+    locations = _manifest_locations(manifest_location)
+    if not locations:
         return UpdateInfo(False, __version__, __version__, "", "", "未配置更新地址。")
-    try:
-        manifest = _read_manifest(manifest_location.strip())
-    except Exception as exc:
-        return UpdateInfo(False, __version__, __version__, "", "", f"检查更新失败：{exc}")
+    errors: list[str] = []
+    for location in locations:
+        try:
+            manifest = _manifest_payload(_read_manifest(location))
+        except Exception as exc:
+            errors.append(f"{location}: {exc}")
+            continue
 
-    latest = str(manifest.get("version", "0.0.0"))
-    download_url = str(manifest.get("download_url", ""))
-    sha256 = str(manifest.get("sha256", ""))
-    available = _version_tuple(latest) > _version_tuple(__version__)
-    message = "发现新版本。" if available else "当前已是最新版本。"
-    return UpdateInfo(available, __version__, latest, download_url, sha256, message)
+        latest = str(manifest.get("version", "0.0.0"))
+        download_url = str(manifest.get("download_url") or manifest.get("url") or "")
+        sha256 = str(manifest.get("sha256", ""))
+        try:
+            size = max(0, int(manifest.get("size", 0) or 0))
+        except (TypeError, ValueError):
+            size = 0
+        raw_notes = manifest.get("notes", ())
+        if isinstance(raw_notes, str):
+            notes = (raw_notes,)
+        elif isinstance(raw_notes, list):
+            notes = tuple(str(item) for item in raw_notes if str(item).strip())
+        else:
+            notes = ()
+        available = _version_tuple(latest) > _version_tuple(__version__)
+        message = "发现新版本。" if available else "当前已是最新版本。"
+        return UpdateInfo(available, __version__, latest, download_url, sha256, message, location, size, notes)
+    return UpdateInfo(False, __version__, __version__, "", "", f"检查更新失败：{'; '.join(errors[:3])}")
 
 
 def download_update(manifest_location: str, info: UpdateInfo, updates_dir: Path, progress=None) -> DownloadedUpdate:
-    url = _resolve_download_url(manifest_location.strip(), info.download_url.strip())
+    locations = _manifest_locations(manifest_location)
+    location = info.manifest_location.strip() or (locations[0] if locations else "")
+    url = _resolve_download_url(location, info.download_url.strip())
     version_dir = updates_dir / info.latest_version
     package_path = version_dir / _download_name(url)
     if version_dir.exists():
         shutil.rmtree(version_dir)
     version_dir.mkdir(parents=True, exist_ok=True)
     _download_file(url, package_path, progress)
+    if info.size and package_path.stat().st_size != info.size:
+        raise ValueError(f"更新包大小校验失败：期望 {info.size}，实际 {package_path.stat().st_size}")
 
     if info.sha256:
         actual = _sha256(package_path)

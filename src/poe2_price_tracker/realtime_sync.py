@@ -2,10 +2,11 @@ from __future__ import annotations
 
 import json
 import urllib.error
+import urllib.parse
 import urllib.request
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Iterator
 
 from .db import RealtimePriceRecord, canonical_currency
 from .secure_config import RedisCredentials, load_redis_credentials
@@ -58,6 +59,14 @@ class RemoteRealtimePrice:
     screenshot_path: str
     note: str
     upvotes: int = 0
+
+
+@dataclass(frozen=True)
+class RealtimeSyncPage:
+    records: list[RemoteRealtimePrice]
+    cursor: str
+    complete: bool
+    scanned: int = 0
 
 
 class RealtimeSyncClient:
@@ -208,6 +217,13 @@ class RealtimeSyncClient:
         return result
 
     @staticmethod
+    def _scan_items(value: Any) -> tuple[str, dict[str, str]]:
+        if not isinstance(value, list) or len(value) < 2:
+            return "0", {}
+        cursor = str(value[0] or "0")
+        return cursor, RealtimeSyncClient._hash_items(value[1])
+
+    @staticmethod
     def _remote_from_payload(remote_key: str, payload: str, upvotes: int) -> RemoteRealtimePrice | None:
         try:
             raw = json.loads(payload)
@@ -242,29 +258,80 @@ class RealtimeSyncClient:
         )
 
     def fetch_all(self) -> list[RemoteRealtimePrice]:
+        records: list[RemoteRealtimePrice] = []
+        for page in self.fetch_pages():
+            records.extend(page.records)
+        records.sort(key=lambda item: (item.captured_at, item.remote_key), reverse=True)
+        return records
+
+    def fetch_pages(self, page_size: int = 500) -> Iterator[RealtimeSyncPage]:
+        page_size = max(50, min(1000, int(page_size or 500)))
         if self.service_url:
-            response = self._service_request("GET", "/v1/realtime/records")
-            raw_records = response.get("records", [])
-            parsed: list[RemoteRealtimePrice] = []
-            if isinstance(raw_records, list):
-                for item in raw_records:
-                    if not isinstance(item, dict):
-                        continue
-                    remote_key = str(item.get("remote_key") or item.get("k") or "").strip()
-                    if not remote_key:
-                        continue
-                    record = self._remote_from_payload(
-                        remote_key,
-                        json.dumps(item, ensure_ascii=False),
-                        int(item.get("upvotes", item.get("u", 0)) or 0),
-                    )
-                    if record is not None:
-                        parsed.append(record)
-            parsed.sort(key=lambda item: (item.captured_at, item.remote_key), reverse=True)
-            return parsed
-        results = self._pipeline([["HGETALL", RECORDS_HASH], ["HGETALL", UPVOTES_HASH]], read_only=True)
-        records = self._hash_items(results[0] if results else {})
-        upvotes_raw = self._hash_items(results[1] if len(results) > 1 else {})
+            cursor = "0"
+            first = True
+            while True:
+                query = urllib.parse.urlencode({"cursor": cursor, "limit": str(page_size)})
+                try:
+                    response = self._service_request("GET", f"/v1/realtime/records?{query}")
+                except RuntimeError:
+                    if not first:
+                        raise
+                    yield RealtimeSyncPage(self._fetch_all_from_service(), "0", True)
+                    return
+                first = False
+                parsed = self._records_from_service_response(response)
+                next_cursor = str(response.get("next_cursor", "0") or "0")
+                complete = bool(response.get("complete", next_cursor == "0"))
+                yield RealtimeSyncPage(parsed, next_cursor, complete, int(response.get("scanned", 0) or 0))
+                if complete or next_cursor == "0":
+                    return
+                cursor = next_cursor
+        else:
+            cursor = "0"
+            while True:
+                results = self._pipeline([["HSCAN", RECORDS_HASH, cursor, "COUNT", str(page_size)]], read_only=True)
+                next_cursor, records = self._scan_items(results[0] if results else [])
+                keys = list(records.keys())
+                upvotes_raw: dict[str, str] = {}
+                if keys:
+                    upvote_results = self._pipeline([["HMGET", UPVOTES_HASH, *keys]], read_only=True)
+                    raw_values = upvote_results[0] if upvote_results else []
+                    if isinstance(raw_values, list):
+                        upvotes_raw = {
+                            key: "0" if value is None else str(value)
+                            for key, value in zip(keys, raw_values)
+                        }
+                parsed = self._records_from_hashes(records, upvotes_raw)
+                yield RealtimeSyncPage(parsed, next_cursor, next_cursor == "0", len(records))
+                if next_cursor == "0":
+                    return
+                cursor = next_cursor
+
+    def _fetch_all_from_service(self) -> list[RemoteRealtimePrice]:
+        response = self._service_request("GET", "/v1/realtime/records")
+        return self._records_from_service_response(response)
+
+    def _records_from_service_response(self, response: dict[str, Any]) -> list[RemoteRealtimePrice]:
+        raw_records = response.get("records", [])
+        parsed: list[RemoteRealtimePrice] = []
+        if isinstance(raw_records, list):
+            for item in raw_records:
+                if not isinstance(item, dict):
+                    continue
+                remote_key = str(item.get("remote_key") or item.get("k") or "").strip()
+                if not remote_key:
+                    continue
+                record = self._remote_from_payload(
+                    remote_key,
+                    json.dumps(item, ensure_ascii=False),
+                    int(item.get("upvotes", item.get("u", 0)) or 0),
+                )
+                if record is not None:
+                    parsed.append(record)
+        parsed.sort(key=lambda item: (item.captured_at, item.remote_key), reverse=True)
+        return parsed
+
+    def _records_from_hashes(self, records: dict[str, str], upvotes_raw: dict[str, str]) -> list[RemoteRealtimePrice]:
         parsed: list[RemoteRealtimePrice] = []
         for remote_key, payload in records.items():
             try:

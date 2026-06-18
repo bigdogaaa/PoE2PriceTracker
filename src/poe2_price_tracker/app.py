@@ -28,6 +28,7 @@ from tkinter import (
     Frame,
     Label,
     LabelFrame,
+    Listbox,
     Menu,
     Radiobutton,
     StringVar,
@@ -65,6 +66,7 @@ from .db import (
     MarketRow,
     PriceDatabase,
     PriceStats,
+    canonical_currency,
     convert_amount,
     display_amount_for_item,
     normalize_name,
@@ -812,10 +814,16 @@ class PriceTrackerApp:
         self.tray_icon = None
         self.syncing = False
         self.realtime_syncing = False
+        self.update_checking = False
         self.realtime_sync_client = RealtimeSyncClient.from_config(
             self.config.data_path,
             self.config.price_share_service_url,
         )
+        self.realtime_sync_seen_count = 0
+        self.realtime_sync_saved_count = 0
+        self.realtime_sync_skipped_count = 0
+        self.realtime_sync_remote_signatures: dict[str, tuple[object, ...]] = {}
+        self.realtime_sync_uses_free_use = False
         self.realtime_sync_free_uses = 1
         self.realtime_sync_credit_score = 0.0
         self.realtime_sync_credit_prices: dict[str, float] = {}
@@ -901,6 +909,9 @@ class PriceTrackerApp:
         self.ocr_provider_var = StringVar(value=self._ocr_provider_label(self.config.ocr_execution_provider))
         self.ocr_low_priority_var = StringVar(value="1" if self.config.ocr_low_priority else "0")
         self.app_icon_image = None
+        self.version_status_var = StringVar(
+            value=self._version_status_text("检查中" if self.config.auto_check_updates else "未检查")
+        )
 
         self.root.title(f"流放之路2 物价追踪 v{__version__}")
         self._apply_window_icon()
@@ -919,6 +930,8 @@ class PriceTrackerApp:
         self.root.bind("<Unmap>", self.on_window_unmap, add="+")
         self.root.after(300, self._ensure_tray_icon)
         self.root.after(450, self._focus_main_window_once)
+        if self.config.auto_check_updates:
+            self.root.after(2500, lambda: self.check_for_updates(silent=True))
 
     def _focus_main_window_once(self) -> None:
         try:
@@ -1007,6 +1020,9 @@ class PriceTrackerApp:
         self.realtime_min_upvotes_var = StringVar(value=str(self.config.realtime_min_upvotes))
         self.show_ocr_details_var = StringVar(value="1" if self.config.show_ocr_review_details else "0")
         self.settings_manifest_var = StringVar(value=self.config.update_manifest)
+        self.update_source_var = StringVar()
+        self.update_sources_listbox = None
+        self.auto_update_var = StringVar(value="1" if self.config.auto_check_updates else "0")
         self.focus_search_shape_var = StringVar(value="圆角" if self.config.focus_search_rounded else "直角")
         self.focus_search_limit_var = StringVar(value=str(self.config.focus_search_limit))
         self.ocr_status_var = StringVar(value="截图识别已内置")
@@ -1032,7 +1048,13 @@ class PriceTrackerApp:
         self.sidebar = Frame(shell, padx=16, pady=18, width=210)
         self.sidebar.pack(side=LEFT, fill="y")
         self.sidebar.pack_propagate(False)
-        Label(self.sidebar, text="流放之路2 物价", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w", pady=(0, 18))
+        Label(self.sidebar, text="流放之路2 物价", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w")
+        Label(
+            self.sidebar,
+            textvariable=self.version_status_var,
+            foreground="#667085",
+            font=("Microsoft YaHei UI", 10),
+        ).pack(anchor="w", pady=(3, 18))
         self._nav_button("物价列表", self.show_market_page).pack(fill=X, pady=4)
         self._nav_button("收藏列表", self.show_favorites_page).pack(fill=X, pady=4)
         Frame(self.sidebar).pack(fill=BOTH, expand=True)
@@ -1048,6 +1070,21 @@ class PriceTrackerApp:
 
     def _nav_button(self, text: str, command):
         return Button(self.sidebar, text=text, command=command)
+
+    @staticmethod
+    def _version_status_text(status: str) -> str:
+        return f"v{__version__} · {status}"
+
+    def _set_version_update_status(self, status: str) -> None:
+        text = self._version_status_text(status)
+        try:
+            self.version_status_var.set(text)
+        except Exception:
+            pass
+        try:
+            self.root.title(f"流放之路2 物价追踪 {text}")
+        except Exception:
+            pass
 
     def _enable_combo_full_click(self, combo: ttk.Combobox) -> ttk.Combobox:
         combo.configure(state="readonly")
@@ -2136,6 +2173,38 @@ class PriceTrackerApp:
             command=self.save_ocr_details_setting,
         ).pack(anchor="w", pady=(8, 0))
 
+        update_box = LabelFrame(body, text="软件更新", padx=14, pady=12)
+        update_box.pack(fill=X, pady=(16, 0))
+        Label(update_box, text="更新地址（从上到下依次尝试）", anchor="w").pack(anchor="w")
+        source_row = Frame(update_box)
+        source_row.pack(fill=X, pady=(6, 0))
+        source_list = Listbox(source_row, height=4, exportselection=False)
+        source_list.pack(side=LEFT, fill=BOTH, expand=True)
+        source_scroll = ttk.Scrollbar(source_row, orient="vertical", command=source_list.yview)
+        source_scroll.pack(side=LEFT, fill=Y)
+        source_list.configure(yscrollcommand=source_scroll.set)
+        source_list.bind("<<ListboxSelect>>", self._on_update_source_selected)
+        self.update_sources_listbox = source_list
+        order_buttons = Frame(source_row)
+        order_buttons.pack(side=LEFT, fill=Y, padx=(8, 0))
+        Button(order_buttons, text="上移", command=self.move_update_source_up).pack(fill=X)
+        Button(order_buttons, text="下移", command=self.move_update_source_down).pack(fill=X, pady=(6, 0))
+        self._load_update_source_list()
+        edit_row = Frame(update_box)
+        edit_row.pack(fill=X, pady=(8, 0))
+        Entry(edit_row, textvariable=self.update_source_var).pack(side=LEFT, fill=X, expand=True)
+        Button(edit_row, text="添加", command=self.add_update_source).pack(side=LEFT, padx=(8, 0))
+        Button(edit_row, text="删除", command=self.remove_update_source).pack(side=LEFT, padx=(6, 0))
+        ttk.Checkbutton(
+            update_box,
+            text="启动后自动检查更新",
+            variable=self.auto_update_var,
+            onvalue="1",
+            offvalue="0",
+            command=self.save_inline_settings,
+        ).pack(anchor="w")
+        Button(update_box, text="检查更新", command=self.check_for_updates).pack(anchor="w", pady=(8, 0))
+
         realtime_sync_box = LabelFrame(body, text="实时价格同步", padx=14, pady=12)
         realtime_sync_box.pack(fill=X, pady=(16, 0))
         Label(
@@ -2184,6 +2253,102 @@ class PriceTrackerApp:
             pass
         for child in widget.winfo_children():
             self._bind_mousewheel_recursive(child, handler)
+
+    @staticmethod
+    def _split_update_sources(value: str) -> list[str]:
+        sources: list[str] = []
+        for line in str(value or "").replace(",", "\n").replace(";", "\n").splitlines():
+            item = line.strip()
+            if item:
+                sources.append(item)
+        return sources
+
+    def _load_update_source_list(self) -> None:
+        listbox = self.update_sources_listbox
+        if listbox is None:
+            return
+        listbox.delete(0, END)
+        for source in self._split_update_sources(self.settings_manifest_var.get()):
+            listbox.insert(END, source)
+        if listbox.size() > 0:
+            listbox.selection_set(0)
+        self.update_source_var.set("")
+
+    def _update_source_values(self) -> list[str]:
+        listbox = self.update_sources_listbox
+        if listbox is None:
+            return self._split_update_sources(self.settings_manifest_var.get())
+        return [str(listbox.get(index)).strip() for index in range(listbox.size()) if str(listbox.get(index)).strip()]
+
+    def _selected_update_source_index(self) -> int | None:
+        listbox = self.update_sources_listbox
+        if listbox is None:
+            return None
+        selection = listbox.curselection()
+        return int(selection[0]) if selection else None
+
+    def _save_update_source_list(self) -> None:
+        self.settings_manifest_var.set("\n".join(self._update_source_values()))
+        self.save_inline_settings()
+
+    def _on_update_source_selected(self, _event=None) -> None:
+        listbox = self.update_sources_listbox
+        index = self._selected_update_source_index()
+        if listbox is None or index is None:
+            return
+        self.update_source_var.set("")
+
+    def add_update_source(self) -> None:
+        listbox = self.update_sources_listbox
+        value = self.update_source_var.get().strip()
+        if listbox is None or not value:
+            return
+        existing = self._update_source_values()
+        if value in existing:
+            index = existing.index(value)
+            listbox.selection_clear(0, END)
+            listbox.selection_set(index)
+            listbox.see(index)
+            return
+        listbox.insert(END, value)
+        listbox.selection_clear(0, END)
+        listbox.selection_set(listbox.size() - 1)
+        self.update_source_var.set("")
+        self._save_update_source_list()
+
+    def remove_update_source(self) -> None:
+        listbox = self.update_sources_listbox
+        index = self._selected_update_source_index()
+        if listbox is None or index is None:
+            return
+        listbox.delete(index)
+        if listbox.size() > 0:
+            next_index = min(index, listbox.size() - 1)
+            listbox.selection_set(next_index)
+        self.update_source_var.set("")
+        self._save_update_source_list()
+
+    def move_update_source_up(self) -> None:
+        self._move_update_source(-1)
+
+    def move_update_source_down(self) -> None:
+        self._move_update_source(1)
+
+    def _move_update_source(self, offset: int) -> None:
+        listbox = self.update_sources_listbox
+        index = self._selected_update_source_index()
+        if listbox is None or index is None:
+            return
+        new_index = index + offset
+        if new_index < 0 or new_index >= listbox.size():
+            return
+        value = listbox.get(index)
+        listbox.delete(index)
+        listbox.insert(new_index, value)
+        listbox.selection_set(new_index)
+        listbox.see(new_index)
+        self.update_source_var.set("")
+        self._save_update_source_list()
 
     def _save_hotkey_setting(self, label: str, value: str) -> None:
         try:
@@ -2304,7 +2469,9 @@ class PriceTrackerApp:
             self.config.realtime_min_upvotes,
             maximum=999999,
         )
-        self.config.update_manifest = self.settings_manifest_var.get().strip()
+        self.config.update_manifest = "\n".join(self._update_source_values()).strip()
+        self.settings_manifest_var.set(self.config.update_manifest)
+        self.config.auto_check_updates = self.auto_update_var.get() == "1"
         save_config(self.config)
         self._configure_style()
         self.refresh_market_table()
@@ -2747,6 +2914,22 @@ class PriceTrackerApp:
         self._rating_button(holder, record_id, bg, size=size, upvotes=upvotes).pack(side=LEFT)
         return True
 
+    def _clear_realtime_current_rating(self) -> None:
+        holder = self.realtime_import_labels.get("current_rating")
+        if holder is None:
+            return
+        try:
+            for child in holder.winfo_children():
+                child.destroy()
+        except Exception:
+            pass
+
+    def _realtime_current_price_target_currency(self) -> str:
+        recognized = canonical_currency(self.realtime_currency_var.get().strip())
+        if recognized in {"神圣石", "崇高石", "混沌石"}:
+            return recognized
+        return canonical_currency(self.display_currency_var.get() or self.config.display_currency)
+
     def _vote_realtime_record(self, event, record_id: int) -> str:
         if record_id <= 0 or record_id in self.realtime_session_votes:
             return "break"
@@ -2765,6 +2948,8 @@ class PriceTrackerApp:
         self.refresh_market_table()
         if self._focus_search_overlay_exists():
             self.refresh_focus_search_results()
+        if self.realtime_import_overlay is not None and self._toplevel_exists(self.realtime_import_overlay):
+            self._update_realtime_current_price_label()
         return "break"
 
     def _settle_market_layout(self) -> None:
@@ -3287,8 +3472,16 @@ class PriceTrackerApp:
                         self._set_progress_idle("实时价格识别未得到可靠结果")
                         self.status_var.set(message or "实时价格识别未得到可靠结果。")
                 elif isinstance(event, tuple) and event[0] == "realtime_sync_done":
-                    _kind, records = event
-                    self._finish_realtime_sync(records)
+                    self._finish_realtime_sync()
+                elif isinstance(event, tuple) and event[0] == "realtime_sync_page":
+                    _kind, records, fetched = event
+                    try:
+                        self._finish_realtime_sync_page(records, fetched)
+                    except Exception as exc:
+                        self.realtime_syncing = False
+                        self._set_progress_idle("Realtime sync failed")
+                        self.status_var.set("Realtime sync failed.")
+                        messagebox.showerror("Realtime sync failed", str(exc))
                 elif isinstance(event, tuple) and event[0] == "realtime_sync_error":
                     _kind, message = event
                     self.realtime_syncing = False
@@ -3302,6 +3495,9 @@ class PriceTrackerApp:
                     _kind, ok, message = event
                     self.redis_sync_status_var.set(str(message))
                     self.status_var.set(str(message))
+                elif isinstance(event, tuple) and event[0] == "update_check_done":
+                    _kind, info, silent = event
+                    self._handle_update_check_result(info, bool(silent))
                 elif isinstance(event, tuple) and event[0] == "update_progress":
                     _kind, percent, url = event
                     self._set_progress_percent(percent, f"更新下载中 {percent}%：{url}")
@@ -4181,7 +4377,7 @@ class PriceTrackerApp:
         rating_source: str = "",
         rating_upvotes: int = 0,
     ) -> None:
-        width, height = 430, 230
+        width, min_height = 460, 260
         trend_color = "#2fb344" if trend.startswith("+") else "#e03131" if trend.startswith("-") else "#9fb5cf"
         overlay = self.quick_price_overlay
         if overlay is None or not self._toplevel_exists(overlay):
@@ -4198,36 +4394,58 @@ class PriceTrackerApp:
 
             frame = Frame(overlay, bg="#10151d", padx=22, pady=20)
             frame.pack(fill=BOTH, expand=True)
-            subtitle_label = Label(frame, fg="#9fb5cf", bg="#10151d", font=("Microsoft YaHei UI", 11))
+            content_width = width - 56
+            subtitle_label = Label(
+                frame,
+                fg="#9fb5cf",
+                bg="#10151d",
+                font=("Microsoft YaHei UI", 11),
+                wraplength=content_width,
+                justify=LEFT,
+            )
             subtitle_label.pack(anchor="w")
             title_label = Label(
                 frame,
                 fg="#f8fafc",
                 bg="#10151d",
                 font=("Microsoft YaHei UI", 18, "bold"),
-                wraplength=380,
+                wraplength=content_width,
                 justify=LEFT,
             )
             title_label.pack(anchor="w", pady=(8, 12))
-            price_label = Label(frame, fg="#ffd166", bg="#10151d", font=("Microsoft YaHei UI", 22, "bold"))
-            price_label.pack(anchor="w")
+            price_row = Frame(frame, bg="#10151d")
+            price_row.pack(fill=X)
+            price_label = Label(
+                price_row,
+                fg="#ffd166",
+                bg="#10151d",
+                font=("Microsoft YaHei UI", 22, "bold"),
+                wraplength=content_width - 100,
+                justify=LEFT,
+            )
+            price_label.pack(side=LEFT, anchor="w", fill=X, expand=True)
+            rating_frame = Frame(price_row, bg="#10151d")
+            rating_frame.pack(side=RIGHT, padx=(12, 0))
             trend_label = Label(
                 frame,
                 bg="#10151d",
                 font=("Microsoft YaHei UI", 13, "bold"),
+                wraplength=content_width,
+                justify=LEFT,
             )
             trend_label.pack(anchor="w", pady=(14, 0))
-            rating_frame = Frame(frame, bg="#10151d")
-            rating_frame.pack(anchor="w", pady=(12, 0))
             hint_label = Label(
                 frame,
                 text="点击或 Esc 关闭，5 秒后自动隐藏",
                 fg="#718096",
                 bg="#10151d",
                 font=("Microsoft YaHei UI", 10),
+                wraplength=content_width,
+                justify=RIGHT,
             )
-            hint_label.pack(anchor="e", side="bottom")
+            hint_label.pack(anchor="e", pady=(12, 0))
             self.quick_price_overlay_labels = {
+                "frame": frame,
                 "subtitle": subtitle_label,
                 "title": title_label,
                 "price": price_label,
@@ -4253,6 +4471,10 @@ class PriceTrackerApp:
                 size=24,
                 upvotes=rating_upvotes,
             )
+        overlay.update_idletasks()
+        frame = labels.get("frame")
+        requested_height = frame.winfo_reqheight() + 8 if frame is not None else min_height
+        height = max(min_height, min(380, requested_height))
         x = max(24, min(self.root.winfo_pointerx() + 24, overlay.winfo_screenwidth() - width - 24))
         y = max(24, min(self.root.winfo_pointery() + 24, overlay.winfo_screenheight() - height - 24))
         overlay.geometry(f"{width}x{height}+{x}+{y}")
@@ -4496,8 +4718,10 @@ class PriceTrackerApp:
             height=2,
         )
         message.pack(fill=X, pady=(10, 0))
+        current_price_row = Frame(frame, bg="#ffffff")
+        current_price_row.pack(fill=X, pady=(6, 0))
         current_price = Label(
-            frame,
+            current_price_row,
             text="当前记录：等待识别",
             fg="#344054",
             bg="#ffffff",
@@ -4507,7 +4731,9 @@ class PriceTrackerApp:
             wraplength=620,
             height=2,
         )
-        current_price.pack(fill=X, pady=(6, 0))
+        current_price.pack(side=LEFT, fill=X, expand=True)
+        current_rating = Frame(current_price_row, bg="#ffffff")
+        current_rating.pack(side=RIGHT, padx=(8, 0))
 
         buttons = Frame(frame, bg="#ffffff")
         buttons.pack(fill=X, side="bottom", pady=(8, 0))
@@ -4521,6 +4747,7 @@ class PriceTrackerApp:
             "currency_note": currency_note,
             "message": message,
             "current_price": current_price,
+            "current_rating": current_rating,
             "submit": submit,
             "item_entry": item_entry,
             "side_combo": side_combo,
@@ -4560,6 +4787,7 @@ class PriceTrackerApp:
         labels["currency_note"].configure(text="等待结果")
         labels["message"].configure(text="识别完成后可确认提交；价格和单位会按市场比例自动计算。")
         labels["current_price"].configure(text="当前记录：等待识别")
+        self._clear_realtime_current_rating()
         labels["submit"].configure(state="disabled")
         self._position_realtime_import_overlay()
         overlay.lift()
@@ -4576,6 +4804,7 @@ class PriceTrackerApp:
             labels["currency_note"].configure(text="未识别")
             labels["message"].configure(text="价格比例不允许手动填写。请重新截图，包含左右两侧物品和比例。")
             labels["current_price"].configure(text="当前记录：未查询")
+            self._clear_realtime_current_rating()
             self._mark_realtime_import_pending()
         else:
             item_name = self.realtime_item_var.get().strip() or "未识别物品"
@@ -4634,30 +4863,62 @@ class PriceTrackerApp:
     def _update_realtime_current_price_label(self) -> None:
         labels = self.realtime_import_labels
         label = labels.get("current_price")
+        self._clear_realtime_current_rating()
         if label is None:
             return
         item_name = self.realtime_item_var.get().strip()
         if not item_name:
             label.configure(text="当前记录：未查询")
             return
-        stats = self.db.get_stats(item_name, min_realtime_upvotes=self._realtime_min_upvotes())
-        if stats is None:
-            label.configure(text="当前记录：本地暂无价格")
-            return
-        target_currency = self.display_currency_var.get() or self.config.display_currency
+        target_currency = self._realtime_current_price_target_currency()
+        item_currency = canonical_currency(item_name)
+        base_currencies = {"神圣石", "崇高石", "混沌石"}
+        stats = None
+        if item_currency in base_currencies and target_currency in base_currencies:
+            stats = self.db.get_base_currency_pair_stats(
+                item_currency,
+                target_currency,
+                min_realtime_upvotes=self._realtime_min_upvotes(),
+            )
+            if stats is None:
+                label.configure(text="当前兑换：本地暂无兑换比例")
+                return
+        else:
+            stats = self.db.get_stats(item_name, min_realtime_upvotes=self._realtime_min_upvotes())
+            if stats is None:
+                label.configure(text="当前记录：本地暂无价格")
+                return
         rate = self.db.get_exalted_per_divine()
         chaos_per_divine = self.db.get_chaos_per_divine()
-        amount = display_amount_for_item(
-            stats.item_name,
-            stats.latest_amount,
-            stats.latest_currency,
-            target_currency,
-            rate,
-            chaos_per_divine,
-        )
+        if item_currency in base_currencies and target_currency in base_currencies:
+            amount = stats.latest_amount
+            prefix = "当前兑换"
+        else:
+            amount = display_amount_for_item(
+                stats.item_name,
+                stats.latest_amount,
+                stats.latest_currency,
+                target_currency,
+                rate,
+                chaos_per_divine,
+            )
+            prefix = "当前记录"
         source = stats.latest_source or "未知来源"
         updated = self._format_time(stats.latest_at)
-        label.configure(text=f"当前记录：{amount:g} {target_currency} · 来源：{source} · {updated}")
+        parts = [f"{prefix}：{amount:g} {target_currency}", f"来源：{source}"]
+        if updated:
+            parts.append(updated)
+        label.configure(text=" · ".join(parts))
+        rating_holder = labels.get("current_rating")
+        if rating_holder is not None:
+            self._render_rating_controls(
+                rating_holder,
+                stats.realtime_record_id,
+                stats.latest_source,
+                "#ffffff",
+                size=20,
+                upvotes=stats.realtime_upvotes,
+            )
 
     def destroy_realtime_import_overlay(self) -> None:
         overlay = self.realtime_import_overlay
@@ -5119,19 +5380,41 @@ class PriceTrackerApp:
         self.reload_hotkeys()
         self.status_var.set(f"设置已加载。数据目录：{self.config.data_path}")
 
-    def check_for_updates(self) -> None:
-        if self.updating:
-            self.progress_var.set("更新正在进行中，请稍候...")
+    def check_for_updates(self, silent: bool = False) -> None:
+        if self.updating or self.update_checking:
+            if not silent:
+                self.progress_var.set("更新正在进行中，请稍候...")
             return
+        self.update_checking = True
+        self._set_version_update_status("检查中")
+        if not silent:
+            self.progress_var.set("正在检查更新...")
+        threading.Thread(target=self._check_update_worker, args=(silent,), daemon=True).start()
+
+    def _check_update_worker(self, silent: bool = False) -> None:
         info = check_update(self.config.update_manifest)
+        self.events.put(("update_check_done", info, silent))
+
+    def _handle_update_check_result(self, info: UpdateInfo, silent: bool = False) -> None:
+        self.update_checking = False
+        if info.available:
+            self._set_version_update_status("有更新")
+        elif "失败" in info.message or "未配置" in info.message:
+            self._set_version_update_status("检查失败")
+        else:
+            self._set_version_update_status("最新版")
         if info.available and info.download_url:
+            notes = "\n".join(f"- {item}" for item in info.notes[:6])
+            note_text = f"\n\n更新内容：\n{notes}" if notes else ""
             if messagebox.askyesno(
                 "发现更新",
-                f"{info.message}\n当前：{info.current_version}\n最新：{info.latest_version}\n\n下载并安装？",
+                f"{info.message}\n当前：{info.current_version}\n最新：{info.latest_version}{note_text}\n\n下载并安装？",
             ):
                 self.updating = True
                 self._set_progress_percent(0, "正在下载更新...")
                 threading.Thread(target=self._download_update_worker, args=(info,), daemon=True).start()
+            return
+        if silent:
             return
         messagebox.showinfo(
             "检查更新",
@@ -5255,11 +5538,12 @@ class PriceTrackerApp:
             self.status_var.set(f"共享贡献积分 +{gained:g}，当前 {self.realtime_sync_credit_score:g}/5。")
 
     def _consume_realtime_sync_permission(self) -> bool:
+        self.realtime_sync_uses_free_use = False
         remaining = self._realtime_sync_remaining_seconds()
         if remaining <= 0:
             return True
         if self.realtime_sync_free_uses > 0:
-            self.realtime_sync_free_uses -= 1
+            self.realtime_sync_uses_free_use = True
             return True
         minutes = remaining // 60
         seconds = remaining % 60
@@ -5285,23 +5569,55 @@ class PriceTrackerApp:
             return
         if not self._consume_realtime_sync_permission():
             return
-        self._record_realtime_sync_attempt()
         self.realtime_syncing = True
+        self.realtime_sync_seen_count = 0
+        self.realtime_sync_saved_count = 0
+        self.realtime_sync_skipped_count = 0
+        self.realtime_sync_remote_signatures = self.db.get_realtime_remote_signatures()
         self._set_progress_percent(0, "正在同步实时价格，请稍候...")
         self.status_var.set("实时价格同步中...")
         threading.Thread(target=self._realtime_sync_worker, daemon=True).start()
 
     def _realtime_sync_worker(self) -> None:
         try:
-            records = self.realtime_sync_client.fetch_all()
+            fetched = 0
+            for page in self.realtime_sync_client.fetch_pages():
+                fetched += len(page.records)
+                self._post_event(("realtime_sync_page", page.records, fetched))
         except Exception as exc:
             self._post_event(("realtime_sync_error", str(exc)))
             return
-        self._post_event(("realtime_sync_done", records))
+        self._post_event(("realtime_sync_done",))
 
-    def _finish_realtime_sync(self, records: list[RemoteRealtimePrice]) -> None:
-        saved = 0
+    @staticmethod
+    def _realtime_sync_record_signature(record: RemoteRealtimePrice) -> tuple[object, ...]:
+        return (
+            record.item_name.strip(),
+            record.item_match.strip(),
+            1 if record.item_known else 0,
+            record.side.strip(),
+            round(float(record.amount), 8),
+            canonical_currency(record.currency),
+            record.want_item.strip(),
+            record.have_item.strip(),
+            round(float(record.market_want_amount), 8),
+            round(float(record.market_have_amount), 8),
+            round(float(record.user_want_amount), 8),
+            round(float(record.user_have_amount), 8),
+            record.source.strip(),
+            record.captured_at.strip(),
+            round(float(record.confidence), 8),
+            record.note,
+            max(0, int(record.upvotes or 0)),
+        )
+
+    def _finish_realtime_sync_page(self, records: list[RemoteRealtimePrice], fetched: int) -> None:
+        self.realtime_sync_seen_count = max(self.realtime_sync_seen_count, int(fetched or 0))
         for record in records:
+            signature = self._realtime_sync_record_signature(record)
+            if self.realtime_sync_remote_signatures.get(record.remote_key) == signature:
+                self.realtime_sync_skipped_count += 1
+                continue
             self.db.upsert_synced_realtime_price_record(
                 remote_key=record.remote_key,
                 item_name=record.item_name,
@@ -5324,11 +5640,29 @@ class PriceTrackerApp:
                 screenshot_path=record.screenshot_path,
                 note=record.note,
             )
-            saved += 1
+            self.realtime_sync_remote_signatures[record.remote_key] = signature
+            self.realtime_sync_saved_count += 1
+        self._set_progress_percent(
+            0,
+            f"实时价格同步中... 已拉取 {self.realtime_sync_seen_count} 条，更新 {self.realtime_sync_saved_count} 条。",
+        )
+        self.status_var.set(
+            f"实时价格同步中... 已拉取 {self.realtime_sync_seen_count} 条，更新 {self.realtime_sync_saved_count} 条。"
+        )
+
+    def _finish_realtime_sync(self) -> None:
+        if self.realtime_sync_uses_free_use and self.realtime_sync_free_uses > 0:
+            self.realtime_sync_free_uses -= 1
+        else:
+            self._record_realtime_sync_attempt()
         self.realtime_syncing = False
         self.refresh_market_table()
-        self._set_progress_idle(f"实时价格同步完成：{saved} 条。")
-        self.status_var.set(f"实时价格同步完成：{saved} 条。")
+        self._set_progress_idle(
+            f"实时价格同步完成：拉取 {self.realtime_sync_seen_count} 条，更新 {self.realtime_sync_saved_count} 条。"
+        )
+        self.status_var.set(
+            f"实时价格同步完成：拉取 {self.realtime_sync_seen_count} 条，更新 {self.realtime_sync_saved_count} 条。"
+        )
 
     def sync_poe2db_currency(self) -> None:
         if self.syncing:

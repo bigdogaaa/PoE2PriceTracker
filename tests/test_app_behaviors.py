@@ -4,6 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 
 from poe2_price_tracker.app import PriceTrackerApp
+from poe2_price_tracker.db import PriceDatabase
 from poe2_price_tracker.market_exchange import ParsedMarketExchange, ParsedRealtimePrice
 from poe2_price_tracker.parser import ParsedItemPrice
 
@@ -34,6 +35,15 @@ class _RealtimeDb:
     def add_realtime_price_record(self, **kwargs):
         self.record = kwargs
         return 123
+
+
+class _Label:
+    def __init__(self):
+        self.text = ""
+
+    def configure(self, **kwargs):
+        if "text" in kwargs:
+            self.text = kwargs["text"]
 
 
 def test_ocr_row_confidence_prefers_structured_score():
@@ -95,6 +105,13 @@ def test_realtime_rating_available_uses_record_id_not_display_source():
     assert app._rating_available(1, "")
     assert app._rating_available(1, "同步来源")
     assert not app._rating_available(0, "实时价格导入-买入")
+
+
+def test_version_status_text_appends_status_after_version():
+    text = PriceTrackerApp._version_status_text("最新版")
+
+    assert text.startswith("v")
+    assert text.endswith(" · 最新版")
 
 
 def test_realtime_submission_credit_uses_new_items_and_significant_price_changes():
@@ -168,3 +185,31 @@ def test_realtime_import_ratio_label_uses_market_ratio():
 
     assert PriceTrackerApp._format_market_exchange_ratio(parsed) == "比例 1:150"
     assert PriceTrackerApp._format_market_exchange_ratio(ParsedMarketExchange()) == "比例未识别"
+
+
+def test_realtime_current_price_uses_recognized_currency_unit_for_comparison():
+    db = PriceDatabase(Path(":memory:"))
+    try:
+        db.add_price_record(
+            "神圣石",
+            181,
+            "崇高石",
+            "实时价格导入-卖出",
+            captured_at="2026-01-02T00:00:00+00:00",
+        )
+        app = PriceTrackerApp.__new__(PriceTrackerApp)
+        label = _Label()
+        app.db = db
+        app.realtime_import_labels = {"current_price": label}
+        app.realtime_item_var = _Var("神圣石")
+        app.realtime_currency_var = _Var("崇高石")
+        app.display_currency_var = _Var("神圣石")
+        app.config = SimpleNamespace(display_currency="神圣石")
+        app._realtime_min_upvotes = lambda: 0
+
+        app._update_realtime_current_price_label()
+
+        assert "当前兑换：181 崇高石" in label.text
+        assert "实时价格导入-卖出" in label.text
+    finally:
+        db.close()
