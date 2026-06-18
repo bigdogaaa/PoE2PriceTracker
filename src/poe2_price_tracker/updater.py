@@ -109,6 +109,28 @@ def _find_executable(root: Path) -> Path | None:
     return all_exe[0] if all_exe else None
 
 
+def _next_available_path(path: Path) -> Path:
+    if not path.exists():
+        return path
+    stem = path.stem
+    suffix = path.suffix
+    parent = path.parent
+    for index in range(1, 1000):
+        candidate = parent / f"{stem}-{index}{suffix}"
+        if not candidate.exists():
+            return candidate
+    raise FileExistsError(f"Cannot find an available filename for {path}")
+
+
+def _stage_executable_near_current(executable: Path, app_dir: Path) -> Path:
+    target = app_dir / executable.name
+    if executable.resolve() == target.resolve():
+        return executable
+    target = _next_available_path(target)
+    shutil.copy2(executable, target)
+    return target
+
+
 def check_update(manifest_location: str) -> UpdateInfo:
     locations = _manifest_locations(manifest_location)
     if not locations:
@@ -141,7 +163,13 @@ def check_update(manifest_location: str) -> UpdateInfo:
     return UpdateInfo(False, __version__, __version__, "", "", f"检查更新失败：{'; '.join(errors[:3])}")
 
 
-def download_update(manifest_location: str, info: UpdateInfo, updates_dir: Path, progress=None) -> DownloadedUpdate:
+def download_update(
+    manifest_location: str,
+    info: UpdateInfo,
+    updates_dir: Path,
+    progress=None,
+    app_dir: Path | None = None,
+) -> DownloadedUpdate:
     locations = _manifest_locations(manifest_location)
     location = info.manifest_location.strip() or (locations[0] if locations else "")
     url = _resolve_download_url(location, info.download_url.strip())
@@ -168,6 +196,8 @@ def download_update(manifest_location: str, info: UpdateInfo, updates_dir: Path,
         shutil.copy2(package_path, extract_dir / package_path.name)
 
     executable = _find_executable(extract_dir)
+    if executable is not None and app_dir is not None:
+        executable = _stage_executable_near_current(executable, app_dir)
     message = "更新已下载并校验完成。"
     if not executable:
         message = "更新已下载，但未在包内找到可执行文件。"

@@ -2,6 +2,7 @@ import hashlib
 import json
 import shutil
 import uuid
+import zipfile
 from pathlib import Path
 
 from poe2_price_tracker import updater
@@ -102,5 +103,36 @@ def test_download_update_checks_size_and_sha256():
 
         assert result.executable_path is not None
         assert result.executable_path.name == package.name
+    finally:
+        shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_download_update_stages_executable_next_to_current_app_dir():
+    tmp_path = _tmp_dir()
+    try:
+        package = tmp_path / "PoE2PriceTracker-2.0.0.zip"
+        with zipfile.ZipFile(package, "w") as archive:
+            archive.writestr("PoE2PriceTracker-2.0.0.exe", b"binary")
+        digest = hashlib.sha256(package.read_bytes()).hexdigest()
+        manifest = tmp_path / "latest.json"
+        manifest.write_text(json.dumps({"version": "2.0.0", "download_url": package.name}), encoding="utf-8")
+        info = updater.UpdateInfo(
+            True,
+            "1.0.0",
+            "2.0.0",
+            package.name,
+            digest,
+            "",
+            str(manifest),
+            package.stat().st_size,
+        )
+        app_dir = tmp_path / "app"
+        app_dir.mkdir()
+
+        result = updater.download_update(str(manifest), info, tmp_path / "updates", app_dir=app_dir)
+
+        assert result.extract_dir.name == "extracted"
+        assert result.executable_path == app_dir / "PoE2PriceTracker-2.0.0.exe"
+        assert result.executable_path.read_bytes() == b"binary"
     finally:
         shutil.rmtree(tmp_path, ignore_errors=True)

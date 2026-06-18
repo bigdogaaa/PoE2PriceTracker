@@ -5426,11 +5426,13 @@ class PriceTrackerApp:
             self.events.put(("update_progress", percent, url))
 
         try:
+            app_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None
             result = download_update(
                 self.config.update_manifest,
                 info,
-                self.config.data_path / "updates",
+                (app_dir / "updates") if app_dir is not None else self.config.data_path / "updates",
                 progress=progress,
+                app_dir=app_dir,
             )
             self.events.put(
                 (
