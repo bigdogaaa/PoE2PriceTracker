@@ -203,6 +203,10 @@ class PriceDatabase:
                 ON items(normalized_name);
             CREATE INDEX IF NOT EXISTS idx_price_records_item_time
                 ON price_records(item_id, captured_at DESC);
+            CREATE INDEX IF NOT EXISTS idx_price_records_item_realtime_time
+                ON price_records(item_id, realtime_record_id, captured_at DESC, id DESC);
+            CREATE INDEX IF NOT EXISTS idx_price_records_source_item
+                ON price_records(source, item_id);
 
             CREATE TABLE IF NOT EXISTS favorites (
                 item_id INTEGER PRIMARY KEY REFERENCES items(id),
@@ -292,6 +296,9 @@ class PriceDatabase:
         self._ensure_realtime_price_columns()
         self.conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_price_records_realtime_record ON price_records(realtime_record_id)"
+        )
+        self.conn.execute(
+            "CREATE INDEX IF NOT EXISTS idx_realtime_price_records_vote ON realtime_price_records(id, upvotes)"
         )
         self.conn.commit()
         self._repair_realtime_price_mirrors()
@@ -609,82 +616,50 @@ class PriceDatabase:
     def get_stats(self, item_name: str, min_realtime_upvotes: int = 0) -> PriceStats | None:
         normalized = normalize_name(item_name)
         min_upvotes = max(0, int(min_realtime_upvotes or 0))
-        row = self.conn.execute(
-            """
-            WITH eligible AS (
-                SELECT r.*
-                FROM price_records r
-                LEFT JOIN realtime_price_records rp_filter ON rp_filter.id = r.realtime_record_id
-                WHERE r.realtime_record_id = 0 OR COALESCE(rp_filter.upvotes, 0) >= ?
-            ),
-            preferred AS (
-                SELECT r.*
-                FROM eligible r
-                WHERE r.realtime_record_id > 0
-                   OR NOT EXISTS (
-                       SELECT 1
-                       FROM eligible realtime
-                       WHERE realtime.item_id = r.item_id
-                         AND realtime.realtime_record_id > 0
-                   )
-            ),
-            latest AS (
-                SELECT r.*
-                FROM preferred r
-                WHERE NOT EXISTS (
-                    SELECT 1
-                    FROM preferred newer
-                    WHERE newer.item_id = r.item_id
-                      AND (
-                          newer.captured_at > r.captured_at
-                          OR (newer.captured_at = r.captured_at AND newer.id > r.id)
-                      )
-                )
-            )
-            SELECT
-                i.name AS item_name,
-                COUNT(r.id) AS count,
-                latest.id AS latest_record_id,
-                latest.amount AS latest_amount,
-                latest.currency AS latest_currency,
-                latest.source AS latest_source,
-                latest.captured_at AS latest_at,
-                latest.realtime_record_id AS realtime_record_id,
-                COALESCE(rp.upvotes, 0) AS realtime_upvotes,
-                COALESCE(rp.downvotes, 0) AS realtime_downvotes,
-                MIN(r.amount) AS min_amount,
-                MAX(r.amount) AS max_amount,
-                AVG(r.amount) AS avg_amount
-            FROM items i
-            JOIN latest ON latest.item_id = i.id
-            JOIN preferred r ON r.item_id = i.id
-            LEFT JOIN realtime_price_records rp ON rp.id = latest.realtime_record_id
-            WHERE i.normalized_name = ?
-            GROUP BY i.id
-            """,
-            (min_upvotes, normalized),
+        item = self.conn.execute(
+            "SELECT id, name FROM items WHERE normalized_name = ?",
+            (normalized,),
         ).fetchone()
-        if not row:
+        if item is None:
             matches = self.search_items(item_name, limit=1)
-            if not matches:
-                return None
-            if normalize_name(matches[0]) == normalized:
+            if not matches or normalize_name(matches[0]) == normalized:
                 return None
             return self.get_stats(matches[0], min_realtime_upvotes=min_upvotes)
+
+        rows = self.conn.execute(
+            """
+            SELECT
+                r.id, r.amount, r.currency, r.source, r.captured_at, r.realtime_record_id,
+                COALESCE(rp.upvotes, 0) AS realtime_upvotes,
+                COALESCE(rp.downvotes, 0) AS realtime_downvotes
+            FROM price_records r
+            LEFT JOIN realtime_price_records rp ON rp.id = r.realtime_record_id
+            WHERE r.item_id = ?
+              AND (r.realtime_record_id = 0 OR COALESCE(rp.upvotes, 0) >= ?)
+            ORDER BY r.captured_at DESC, r.id DESC
+            """,
+            (int(item["id"]), min_upvotes),
+        ).fetchall()
+        if not rows:
+            return None
+        realtime_rows = [row for row in rows if int(row["realtime_record_id"] or 0) > 0]
+        preferred = realtime_rows or list(rows)
+        latest = preferred[0]
+        amounts = [float(row["amount"]) for row in preferred]
         return PriceStats(
-            item_name=str(row["item_name"]),
-            count=int(row["count"]),
-            latest_amount=float(row["latest_amount"]),
-            latest_currency=str(row["latest_currency"]),
-            latest_at=str(row["latest_at"]),
-            min_amount=float(row["min_amount"]),
-            max_amount=float(row["max_amount"]),
-            avg_amount=float(row["avg_amount"]),
-            latest_source=str(row["latest_source"]),
-            latest_record_id=int(row["latest_record_id"] or 0),
-            realtime_record_id=int(row["realtime_record_id"] or 0),
-            realtime_upvotes=int(row["realtime_upvotes"] or 0),
-            realtime_downvotes=int(row["realtime_downvotes"] or 0),
+            item_name=str(item["name"]),
+            count=len(preferred),
+            latest_amount=float(latest["amount"]),
+            latest_currency=str(latest["currency"]),
+            latest_at=str(latest["captured_at"]),
+            min_amount=min(amounts),
+            max_amount=max(amounts),
+            avg_amount=sum(amounts) / len(amounts),
+            latest_source=str(latest["source"]),
+            latest_record_id=int(latest["id"] or 0),
+            realtime_record_id=int(latest["realtime_record_id"] or 0),
+            realtime_upvotes=int(latest["realtime_upvotes"] or 0),
+            realtime_downvotes=int(latest["realtime_downvotes"] or 0),
         )
 
     def get_recent_records(
@@ -697,47 +672,36 @@ class PriceDatabase:
         params: tuple[object, ...]
         where = ""
         if item_name.strip():
-            where = "WHERE i.normalized_name = ?"
-            params = (normalize_name(item_name), limit)
-        else:
-            params = (limit,)
-        if prefer_realtime_if_available and item_name.strip():
+            item = self.conn.execute(
+                "SELECT id, name FROM items WHERE normalized_name = ?",
+                (normalize_name(item_name),),
+            ).fetchone()
+            if item is None:
+                return []
+            if prefer_realtime_if_available:
+                histories = self._price_histories_for_item_ids(
+                    [int(item["id"])],
+                    limit=limit,
+                    min_realtime_upvotes=min_realtime_upvotes,
+                )
+                return list(reversed(histories.get(int(item["id"]), [])))
             rows = self.conn.execute(
                 """
-                WITH eligible AS (
-                    SELECT r.*
-                    FROM price_records r
-                    LEFT JOIN realtime_price_records rp_filter ON rp_filter.id = r.realtime_record_id
-                    JOIN items source_item ON source_item.id = r.item_id
-                    WHERE source_item.normalized_name = ?
-                      AND (r.realtime_record_id = 0 OR COALESCE(rp_filter.upvotes, 0) >= ?)
-                ),
-                preferred AS (
-                    SELECT r.*
-                    FROM eligible r
-                    WHERE r.realtime_record_id > 0
-                       OR NOT EXISTS (
-                           SELECT 1
-                           FROM eligible realtime
-                           WHERE realtime.item_id = r.item_id
-                             AND realtime.realtime_record_id > 0
-                       )
-                )
                 SELECT
-                    r.id, i.name AS item_name, r.amount, r.currency, r.source,
+                    r.id, r.amount, r.currency, r.source,
                     r.captured_at, r.confidence, r.raw_text, r.screenshot_path,
                     r.realtime_record_id
-                FROM preferred r
-                JOIN items i ON i.id = r.item_id
+                FROM price_records r
+                WHERE r.item_id = ?
                 ORDER BY r.captured_at DESC, r.id DESC
                 LIMIT ?
                 """,
-                (normalize_name(item_name), max(0, int(min_realtime_upvotes or 0)), limit),
+                (int(item["id"]), limit),
             ).fetchall()
             return [
                 PriceRecord(
                     id=int(row["id"]),
-                    item_name=str(row["item_name"]),
+                    item_name=str(item["name"]),
                     amount=float(row["amount"]),
                     currency=str(row["currency"]),
                     source=str(row["source"]),
@@ -749,6 +713,8 @@ class PriceDatabase:
                 )
                 for row in rows
             ]
+        else:
+            params = (limit,)
         rows = self.conn.execute(
             f"""
             SELECT
@@ -778,6 +744,55 @@ class PriceDatabase:
             )
             for row in rows
         ]
+
+    def _price_histories_for_item_ids(
+        self,
+        item_ids: list[int],
+        limit: int = 12,
+        min_realtime_upvotes: int = 0,
+    ) -> dict[int, list[PriceRecord]]:
+        clean_ids = [int(item_id) for item_id in dict.fromkeys(item_ids) if int(item_id) > 0]
+        if not clean_ids:
+            return {}
+        placeholders = ",".join("?" for _ in clean_ids)
+        rows = self.conn.execute(
+            f"""
+            SELECT
+                r.item_id, i.name AS item_name, r.id, r.amount, r.currency, r.source,
+                r.captured_at, r.confidence, r.raw_text, r.screenshot_path,
+                r.realtime_record_id
+            FROM price_records r
+            JOIN items i ON i.id = r.item_id
+            LEFT JOIN realtime_price_records rp ON rp.id = r.realtime_record_id
+            WHERE r.item_id IN ({placeholders})
+              AND (r.realtime_record_id = 0 OR COALESCE(rp.upvotes, 0) >= ?)
+            ORDER BY r.item_id, r.captured_at DESC, r.id DESC
+            """,
+            tuple([*clean_ids, max(0, int(min_realtime_upvotes or 0))]),
+        ).fetchall()
+        grouped: dict[int, list[sqlite3.Row]] = {item_id: [] for item_id in clean_ids}
+        for row in rows:
+            grouped.setdefault(int(row["item_id"]), []).append(row)
+        histories: dict[int, list[PriceRecord]] = {}
+        for item_id, group in grouped.items():
+            realtime_group = [row for row in group if int(row["realtime_record_id"] or 0) > 0]
+            selected = (realtime_group or group)[: max(1, int(limit or 12))]
+            histories[item_id] = [
+                PriceRecord(
+                    id=int(row["id"]),
+                    item_name=str(row["item_name"]),
+                    amount=float(row["amount"]),
+                    currency=str(row["currency"]),
+                    source=str(row["source"]),
+                    captured_at=str(row["captured_at"]),
+                    confidence=float(row["confidence"]),
+                    raw_text=str(row["raw_text"]),
+                    screenshot_path=str(row["screenshot_path"]),
+                    realtime_record_id=int(row["realtime_record_id"] or 0),
+                )
+                for row in reversed(selected)
+            ]
+        return histories
 
     def get_market_rows(
         self,
@@ -951,21 +966,18 @@ class PriceDatabase:
             tuple(params),
         ).fetchall()
         result = []
-        conversion_rate: float | None = None
+        histories_by_item_id = self._price_histories_for_item_ids(
+            [int(row["item_id"]) for row in rows],
+            limit=12,
+            min_realtime_upvotes=min_upvotes,
+        )
+        conversion_rate = rate
         for row in rows:
             history_currency = str(row["latest_currency"])
             trend_match = __import__("re").search(r"trend=([+-]?\d+(?:\.\d+)?%)", str(row["latest_raw_text"]))
-            history = self.get_price_history(
-                str(row["item_name"]),
-                limit=12,
-                min_realtime_upvotes=min_upvotes,
-                prefer_realtime_if_available=True,
-            )
+            history = histories_by_item_id.get(int(row["item_id"]), [])
             has_realtime_history = any(record.realtime_record_id > 0 for record in history)
             if len(history) >= 2:
-                if conversion_rate is None:
-                    conversion_rate = self.get_exalted_per_divine()
-                chaos_per_divine = self.get_chaos_per_divine()
                 history_values = [
                     convert_amount(record.amount, record.currency, history_currency, conversion_rate or 160.0, chaos_per_divine)
                     for record in history
@@ -1769,6 +1781,9 @@ class PriceDatabase:
 
         if not candidates:
             return None
+        realtime_candidates = [candidate for candidate in candidates if candidate[4] > 0]
+        if realtime_candidates:
+            candidates = realtime_candidates
         captured_at, record_id, amount, quote_source, realtime_id, upvotes, downvotes = sorted(candidates, reverse=True)[0]
         return PriceStats(
             item_name=source,
@@ -1785,6 +1800,60 @@ class PriceDatabase:
             realtime_upvotes=upvotes,
             realtime_downvotes=downvotes,
         )
+
+    def get_base_currency_pair_history(
+        self,
+        item_currency: str,
+        target_currency: str,
+        limit: int = 12,
+        min_realtime_upvotes: int = 0,
+    ) -> list[PriceRecord]:
+        source = canonical_currency(item_currency)
+        target = canonical_currency(target_currency)
+        base_currencies = {"神圣石", "崇高石", "混沌石"}
+        if source not in base_currencies or target not in base_currencies or source == target:
+            return []
+        source_aliases = self._base_currency_aliases(source)
+        target_aliases = self._base_currency_aliases(target)
+        candidates: list[tuple[str, int, float, str, int]] = []
+
+        for amount, captured_at, record_id, quote_source, realtime_id, _upvotes, _downvotes in self._currency_quote_rows(
+            source_aliases,
+            target_aliases,
+            min_realtime_upvotes=min_realtime_upvotes,
+        ):
+            if self._valid_base_currency_pair_amount(source, target, amount):
+                candidates.append((captured_at, record_id, amount, quote_source, realtime_id))
+
+        for amount, captured_at, record_id, quote_source, realtime_id, _upvotes, _downvotes in self._currency_quote_rows(
+            target_aliases,
+            source_aliases,
+            min_realtime_upvotes=min_realtime_upvotes,
+        ):
+            converted = 1.0 / amount
+            if self._valid_base_currency_pair_amount(source, target, converted):
+                candidates.append((captured_at, record_id, converted, quote_source, realtime_id))
+
+        realtime_candidates = [candidate for candidate in candidates if candidate[4] > 0]
+        if realtime_candidates:
+            candidates = realtime_candidates
+        candidates = sorted(candidates, reverse=True)[: max(1, int(limit or 12))]
+        candidates.reverse()
+        return [
+            PriceRecord(
+                id=record_id,
+                item_name=source,
+                amount=amount,
+                currency=target,
+                source=quote_source,
+                captured_at=captured_at,
+                confidence=1.0,
+                raw_text="",
+                screenshot_path="",
+                realtime_record_id=realtime_id,
+            )
+            for captured_at, record_id, amount, quote_source, realtime_id in candidates
+        ]
 
     def get_exalted_per_divine(self) -> float:
         divine_aliases = ("神圣石", "Divine Orb", "divine")

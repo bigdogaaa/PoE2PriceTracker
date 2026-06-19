@@ -50,11 +50,7 @@ class RapidOcr:
         cpu_count = os.cpu_count() or 4
         if requested > 0:
             return max(1, min(requested, cpu_count))
-        if cpu_count <= 4:
-            return 1
-        if cpu_count <= 8:
-            return 2
-        return max(2, min(6, cpu_count // 3))
+        return max(1, cpu_count // 4)
 
     @staticmethod
     def _normalize_provider(value: str) -> str:

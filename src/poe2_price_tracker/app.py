@@ -11,6 +11,7 @@ import threading
 import time
 import urllib.error
 import urllib.request
+import webbrowser
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
@@ -57,9 +58,78 @@ Combobox = ttk.Combobox
 ERROR_ALREADY_EXISTS = 183
 _INSTANCE_MUTEX_HANDLE = None
 
+
+class HoverTooltip:
+    def __init__(self, widget, text: str, delay_ms: int = 450, wraplength: int = 300):
+        self.widget = widget
+        self.text = text
+        self.delay_ms = delay_ms
+        self.wraplength = wraplength
+        self._after_id = None
+        self._window = None
+        widget.bind("<Enter>", self._schedule, add="+")
+        widget.bind("<Leave>", self._hide, add="+")
+        widget.bind("<ButtonPress>", self._hide, add="+")
+
+    def _schedule(self, _event=None) -> None:
+        self._cancel()
+        self._after_id = self.widget.after(self.delay_ms, self._show)
+
+    def _cancel(self) -> None:
+        if self._after_id is not None:
+            try:
+                self.widget.after_cancel(self._after_id)
+            except Exception:
+                pass
+            self._after_id = None
+
+    def _show(self) -> None:
+        self._after_id = None
+        if self._window is not None or not self.text:
+            return
+        try:
+            x = self.widget.winfo_rootx() + self.widget.winfo_width() + 10
+            y = self.widget.winfo_rooty() + 4
+        except Exception:
+            x, y = 80, 80
+        window = Toplevel(self.widget)
+        self._window = window
+        window.overrideredirect(True)
+        window.attributes("-topmost", True)
+        window.geometry(f"+{x}+{y}")
+        Label(
+            window,
+            text=self.text,
+            justify=LEFT,
+            wraplength=self.wraplength,
+            bg="#172033",
+            fg="#ffffff",
+            padx=10,
+            pady=7,
+        ).pack()
+
+    def _hide(self, _event=None) -> None:
+        self._cancel()
+        window = self._window
+        self._window = None
+        if window is not None:
+            try:
+                window.destroy()
+            except Exception:
+                pass
+
+
 from .bundled_assets import app_icon_path, seed_bundled_currency_icons
 from . import __version__
-from .config import AppConfig, load_config, save_config
+from .config import (
+    AppConfig,
+    GITEE_UPDATE_MANIFEST_URL,
+    GITHUB_UPDATE_MANIFEST_URL,
+    effective_update_manifest,
+    load_config,
+    normalize_extra_update_manifest,
+    save_config,
+)
 from .currencies import BASE_CURRENCIES
 from .clipboard_parser import parse_poe_clipboard_item
 from .db import (
@@ -794,6 +864,10 @@ class RegionOcrWorkbench:
 class PriceTrackerApp:
     def __init__(self, root: Tk):
         self.root = root
+        try:
+            self.root.withdraw()
+        except Exception:
+            pass
         self.config = load_config()
         self.db = PriceDatabase(self.config.database_path)
         self.bundled_currency_icon_count = seed_bundled_currency_icons(self.db)
@@ -828,6 +902,7 @@ class PriceTrackerApp:
         self.realtime_sync_credit_score = 0.0
         self.realtime_sync_credit_prices: dict[str, float] = {}
         self.updating = False
+        self.progress_reset_job = None
         self.page_var = StringVar(value="1")
         self.page_size_var = StringVar(value=str(self.config.page_size))
         self.display_currency_var = StringVar(value=self.config.display_currency)
@@ -846,6 +921,7 @@ class PriceTrackerApp:
         self._ignore_unmap_prompt = False
         self.context_item_name = ""
         self._quick_price_foreground_hwnd = 0
+        self._quick_price_anchor: tuple[int, int] | None = None
         self.quick_price_overlay = None
         self.quick_price_overlay_labels = {}
         self.quick_price_overlay_hide_job = None
@@ -867,6 +943,7 @@ class PriceTrackerApp:
         self.screenshot_lookup_container = None
         self.screenshot_lookup_container_window = None
         self.screenshot_lookup_results = None
+        self.screenshot_lookup_result_box = None
         self.screenshot_lookup_results_canvas = None
         self.screenshot_lookup_result_window = None
         self.screenshot_lookup_results_scrollbar = None
@@ -909,17 +986,32 @@ class PriceTrackerApp:
         self.ocr_provider_var = StringVar(value=self._ocr_provider_label(self.config.ocr_execution_provider))
         self.ocr_low_priority_var = StringVar(value="1" if self.config.ocr_low_priority else "0")
         self.app_icon_image = None
+        self.latest_update_info: UpdateInfo | None = None
+        self.update_check_token = 0
+        self.update_check_started_at = 0.0
+        self.manual_download_checking = False
+        self.manual_download_button = None
+        self.version_status_label = None
+        self.version_status_frame = None
+        self.version_status_prefix_label = None
+        self.version_status_link_label = None
+        self.version_update_available = False
         self.version_status_var = StringVar(
             value=self._version_status_text("检查中" if self.config.auto_check_updates else "未检查")
         )
 
         self.root.title(f"流放之路2 物价追踪 v{__version__}")
         self._apply_window_icon()
-        self.root.geometry("1120x760")
         self.root.minsize(980, 640)
         self._configure_style()
         self._build_menu()
         self._build_ui()
+        self.root.update_idletasks()
+        self._set_root_initial_geometry(1120, 760)
+        try:
+            self.root.deiconify()
+        except Exception:
+            pass
         self._register_hotkeys()
         self._refresh_recent()
         self._poll_events()
@@ -931,9 +1023,11 @@ class PriceTrackerApp:
         self.root.after(300, self._ensure_tray_icon)
         self.root.after(450, self._focus_main_window_once)
         if self.config.auto_check_updates:
-            self.root.after(2500, lambda: self.check_for_updates(silent=True))
+            self.root.after(900, lambda: self.check_for_updates(silent=False))
 
     def _focus_main_window_once(self) -> None:
+        if getattr(self, "_area_capture_active", False):
+            return
         try:
             self.root.deiconify()
             self.root.lift()
@@ -942,6 +1036,72 @@ class PriceTrackerApp:
             self.root.after(250, lambda: self.root.attributes("-topmost", False))
         except Exception:
             pass
+
+    def _set_root_initial_geometry(self, width: int, height: int) -> None:
+        left, top, right, bottom = self._current_monitor_work_area()
+        x, y = self._center_rect_in_bounds(width, height, (left, top, right, bottom))
+        self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _current_monitor_work_area(self) -> tuple[int, int, int, int]:
+        point = self._cursor_screen_position()
+        bounds = self._monitor_work_area_for_point(point)
+        if bounds is not None:
+            return bounds
+        try:
+            return 0, 0, int(self.root.winfo_screenwidth()), int(self.root.winfo_screenheight())
+        except Exception:
+            return 0, 0, 1120, 760
+
+    @staticmethod
+    def _monitor_work_area_for_point(point: tuple[int, int]) -> tuple[int, int, int, int] | None:
+        try:
+            class MONITORINFO(ctypes.Structure):
+                _fields_ = [
+                    ("cbSize", wintypes.DWORD),
+                    ("rcMonitor", wintypes.RECT),
+                    ("rcWork", wintypes.RECT),
+                    ("dwFlags", wintypes.DWORD),
+                ]
+
+            user32 = ctypes.windll.user32
+            monitor = user32.MonitorFromPoint(wintypes.POINT(int(point[0]), int(point[1])), 2)
+            if not monitor:
+                return None
+            info = MONITORINFO()
+            info.cbSize = ctypes.sizeof(MONITORINFO)
+            if not user32.GetMonitorInfoW(monitor, ctypes.byref(info)):
+                return None
+            work = info.rcWork
+            if work.right <= work.left or work.bottom <= work.top:
+                return None
+            return int(work.left), int(work.top), int(work.right), int(work.bottom)
+        except Exception:
+            return None
+
+    @staticmethod
+    def _center_rect_in_bounds(width: int, height: int, bounds: tuple[int, int, int, int]) -> tuple[int, int]:
+        left, top, right, bottom = bounds
+        x = left + max(0, (right - left - width) // 2)
+        y = top + max(0, (bottom - top - height) // 2)
+        return int(x), int(y)
+
+    def _center_window_on_parent(self, window: Toplevel, width: int, height: int) -> None:
+        try:
+            self.root.update_idletasks()
+            parent_x = int(self.root.winfo_rootx())
+            parent_y = int(self.root.winfo_rooty())
+            parent_width = int(self.root.winfo_width())
+            parent_height = int(self.root.winfo_height())
+            if parent_width > 1 and parent_height > 1:
+                x = parent_x + max(0, (parent_width - width) // 2)
+                y = parent_y + max(0, (parent_height - height) // 2)
+                window.geometry(f"{width}x{height}+{x}+{y}")
+                return
+        except Exception:
+            pass
+        left, top, right, bottom = self._current_monitor_work_area()
+        x, y = self._center_rect_in_bounds(width, height, (left, top, right, bottom))
+        window.geometry(f"{width}x{height}+{x}+{y}")
 
     def _configure_style(self) -> None:
         style = ttk.Style()
@@ -956,6 +1116,12 @@ class PriceTrackerApp:
         style.configure("Market.Treeview", rowheight=rowheight, font=("Microsoft YaHei UI", size))
         style.configure("Market.Treeview.Heading", font=("Microsoft YaHei UI", size, "bold"))
         style.configure("TNotebook.Tab", padding=(16, 8))
+        style.configure(
+            "Accent.TButton",
+            foreground="#ffffff",
+            background="#d92d20",
+            padding=(14, 7),
+        )
 
     def _build_menu(self) -> None:
         menu = Menu(self.root)
@@ -1048,19 +1214,24 @@ class PriceTrackerApp:
         self.sidebar = Frame(shell, padx=16, pady=18, width=210)
         self.sidebar.pack(side=LEFT, fill="y")
         self.sidebar.pack_propagate(False)
-        Label(self.sidebar, text="流放之路2 物价", font=("Microsoft YaHei UI", 18, "bold")).pack(anchor="w")
-        Label(
-            self.sidebar,
-            textvariable=self.version_status_var,
-            foreground="#667085",
-            font=("Microsoft YaHei UI", 10),
-        ).pack(anchor="w", pady=(3, 18))
+        Label(self.sidebar, text="流放之路2 物价", font=("Microsoft YaHei UI", 18, "bold")).pack(
+            anchor="w",
+            pady=(0, 18),
+        )
         self._nav_button("物价列表", self.show_market_page).pack(fill=X, pady=4)
         self._nav_button("收藏列表", self.show_favorites_page).pack(fill=X, pady=4)
         Frame(self.sidebar).pack(fill=BOTH, expand=True)
         self._nav_button("配置", self.show_settings_page).pack(side="bottom", fill=X, pady=4)
-        self._nav_button("同步经济数据", self.sync_poe2db_currency).pack(side="bottom", fill=X, pady=4)
-        self._nav_button("同步实时价格", self.sync_realtime_prices).pack(side="bottom", fill=X, pady=4)
+        self._nav_button(
+            "同步经济数据",
+            self.sync_poe2db_currency,
+            "从 poe2db 同步通货与经济数据，用于基础通货换算、趋势回退和市场参考。每 30 分钟最多同步一次。",
+        ).pack(side="bottom", fill=X, pady=4)
+        self._nav_button(
+            "同步实时价格",
+            self.sync_realtime_prices,
+            "从价格共享服务拉取用户确认的实时交易价格，并合并到本地数据库供查询参考。每次启动默认可同步一次；之后每 30 分钟一次，贡献积分满 5 分可额外同步一次。",
+        ).pack(side="bottom", fill=X, pady=4)
         self._nav_button("手动记录", self.show_manual_record_page).pack(side="bottom", fill=X, pady=4)
         self._nav_button("截图识别", self.show_ocr_review_page).pack(side="bottom", fill=X, pady=4)
 
@@ -1068,21 +1239,216 @@ class PriceTrackerApp:
         self.content.pack(side=LEFT, fill=BOTH, expand=True)
         self.show_market_page()
 
-    def _nav_button(self, text: str, command):
-        return Button(self.sidebar, text=text, command=command)
+    def _nav_button(self, text: str, command, tooltip_text: str = ""):
+        button = Button(self.sidebar, text=text, command=command)
+        if tooltip_text:
+            HoverTooltip(button, tooltip_text)
+        return button
+
+    def _build_version_status_widget(self, parent):
+        frame = Frame(parent)
+        self.version_status_frame = frame
+        self.version_status_prefix_label = Label(frame, text="", foreground="#667085")
+        self.version_status_prefix_label.pack(side=LEFT)
+        self.version_status_link_label = Label(frame, text="", foreground="#667085")
+        self.version_status_link_label.pack(side=LEFT)
+        self.version_status_label = self.version_status_link_label
+        self._refresh_version_status_widget(self.version_status_var.get(), self.version_update_available)
+        return frame
 
     @staticmethod
     def _version_status_text(status: str) -> str:
         return f"v{__version__} · {status}"
 
-    def _set_version_update_status(self, status: str) -> None:
+    def _set_version_update_status(self, status: str, available: bool = False) -> None:
         text = self._version_status_text(status)
+        self.version_update_available = available
         try:
             self.version_status_var.set(text)
         except Exception:
             pass
+        self._refresh_version_status_widget(text, available)
         try:
             self.root.title(f"流放之路2 物价追踪 {text}")
+        except Exception:
+            pass
+
+    def _refresh_version_status_widget(self, text: str, available: bool = False) -> None:
+        prefix = getattr(self, "version_status_prefix_label", None)
+        link = getattr(self, "version_status_link_label", None)
+        if prefix is None or link is None:
+            return
+        color = "#d92d20" if available else "#667085"
+        base_font = ("Microsoft YaHei UI", max(10, int(getattr(self.config, "font_size", 13))))
+        link_font = (base_font[0], base_font[1], "underline")
+        prefix_text = text
+        link_text = ""
+        if available:
+            for candidate in ("点击手动下载", "点击下载"):
+                if candidate in text:
+                    prefix_text, _separator, _after = text.partition(candidate)
+                    link_text = candidate
+                    break
+        try:
+            prefix.configure(text=prefix_text, foreground=color, font=base_font)
+            link.configure(
+                text=link_text,
+                foreground=color,
+                cursor="hand2" if link_text else "",
+                font=link_font if link_text else base_font,
+            )
+            if link_text:
+                link.bind("<Button-1>", self.open_update_download)
+                link.bind("<Enter>", lambda _event: link.configure(foreground="#b42318"))
+                link.bind("<Leave>", lambda _event: link.configure(foreground=color))
+            else:
+                link.unbind("<Button-1>")
+                link.unbind("<Enter>")
+                link.unbind("<Leave>")
+        except Exception:
+            pass
+
+    def _set_manual_download_button_enabled(self, enabled: bool) -> None:
+        button = getattr(self, "manual_download_button", None)
+        if button is None:
+            return
+        try:
+            button.configure(state="normal" if enabled else "disabled")
+        except Exception:
+            pass
+
+    @staticmethod
+    def _first_manual_update_url(info: UpdateInfo | None) -> str:
+        if info is None:
+            return ""
+        for url in getattr(info, "manual_urls", ()):
+            text = str(url or "").strip()
+            if text.startswith(("http://", "https://")):
+                return text
+        return ""
+
+    def open_update_download(self, _event=None) -> None:
+        info = self.latest_update_info
+        if info is None or not info.available:
+            return
+        if self.updating:
+            self.progress_var.set("更新正在进行中，请稍候...")
+            return
+        manual_url = self._first_manual_update_url(info)
+        if manual_url:
+            webbrowser.open(manual_url)
+            return
+        self._confirm_auto_download_update(info)
+
+    def open_latest_manual_download(self) -> None:
+        info = self.latest_update_info
+        manual_url = self._first_manual_update_url(info) if info is not None and info.available else ""
+        if manual_url:
+            webbrowser.open(manual_url)
+            return
+        if self.manual_download_checking or self.update_checking:
+            self.progress_var.set("正在检查最新版下载链接...")
+            return
+        self.manual_download_checking = True
+        self._set_progress_busy("正在检查最新版下载链接...")
+        threading.Thread(target=self._manual_download_check_worker, daemon=True).start()
+
+    def _manual_download_check_worker(self) -> None:
+        try:
+            info = check_update(effective_update_manifest(self.config.update_manifest))
+        except Exception as exc:
+            info = UpdateInfo(False, __version__, __version__, "", "", f"检查失败：{exc}")
+        self.events.put(("manual_download_check_done", info))
+
+    def _handle_manual_download_check_result(self, info: UpdateInfo) -> None:
+        self.manual_download_checking = False
+        manual_url = self._first_manual_update_url(info)
+        self.latest_update_info = info if info.available else None
+        self._set_manual_download_button_enabled(bool(info.available and manual_url))
+        if info.available and manual_url:
+            self._set_version_update_status("有更新，点击手动下载", available=True)
+            webbrowser.open(manual_url)
+            return
+        if info.available:
+            status = "有更新，点击手动下载" if manual_url else "有更新，点击下载"
+            self._set_version_update_status(status, available=True)
+        else:
+            self._set_version_update_status("最新版" if "失败" not in info.message else "检查失败")
+        self._set_progress_then_idle("检查更新失败" if "失败" in info.message else "当前已是最新版")
+        messagebox.showinfo("手动下载最新版", "暂未获取到夸克网盘下载链接，请稍后再试。")
+
+    def _confirm_auto_download_update(self, info: UpdateInfo) -> None:
+        if self.updating:
+            self.progress_var.set("更新正在进行中，请稍候...")
+            return
+        if messagebox.askyesno(
+            "发现更新",
+            f"{info.message}\n当前：{info.current_version}\n最新：{info.latest_version}\n\n下载并安装？",
+            parent=self.root,
+        ):
+            self.updating = True
+            self._set_progress_percent(0, "正在下载更新...")
+            threading.Thread(target=self._download_update_worker, args=(info,), daemon=True).start()
+
+    def _show_update_available_dialog(self, info: UpdateInfo) -> None:
+        manual_url = self._first_manual_update_url(info)
+        if not manual_url:
+            self._confirm_auto_download_update(info)
+            return
+
+        window = Toplevel(self.root)
+        window.withdraw()
+        window.title("发现更新")
+        window.resizable(False, False)
+        window.transient(self.root)
+        self._apply_toplevel_icon(window)
+        body = Frame(window, padx=20, pady=18)
+        body.pack(fill=BOTH, expand=True)
+        Label(
+            body,
+            text=f"发现新版本 {info.latest_version}",
+            font=("Microsoft YaHei UI", self.config.font_size + 5, "bold"),
+        ).pack(anchor="w")
+        Label(
+            body,
+            text=f"当前版本：{info.current_version}",
+            foreground="#667085",
+        ).pack(anchor="w", pady=(6, 0))
+        notes = "\n".join(f"- {item}" for item in info.notes[:4])
+        if notes:
+            Label(body, text=f"更新内容：\n{notes}", justify=LEFT, wraplength=470).pack(anchor="w", pady=(12, 0))
+        actions = Frame(body)
+        actions.pack(side="bottom", fill=X, pady=(18, 0))
+
+        def open_quark() -> None:
+            webbrowser.open(manual_url)
+            window.destroy()
+
+        def auto_download() -> None:
+            window.destroy()
+            self._confirm_auto_download_update(info)
+
+        quark_button = Button(
+            actions,
+            text="夸克网盘下载",
+            command=open_quark,
+            bg="#e8f1ff",
+            fg="#245b8f",
+            activebackground="#dbeafe",
+            activeforeground="#17466f",
+            relief="groove",
+            padx=12,
+        )
+        quark_button.pack(side=LEFT)
+        Button(actions, text="稍后", command=window.destroy).pack(side=RIGHT)
+        Button(actions, text="GitHub自动下载", command=auto_download).pack(side=RIGHT, padx=(0, 8))
+        window.update_idletasks()
+        self._center_window_on_parent(window, max(520, window.winfo_reqwidth()), max(280, min(380, window.winfo_reqheight())))
+        try:
+            window.deiconify()
+            window.lift(self.root)
+            window.focus_force()
+            window.grab_set()
         except Exception:
             pass
 
@@ -1104,11 +1470,30 @@ class PriceTrackerApp:
             combo.event_generate("<Down>")
 
     def _set_progress_idle(self, text: str = "就绪") -> None:
+        if self.progress_reset_job is not None:
+            try:
+                self.root.after_cancel(self.progress_reset_job)
+            except Exception:
+                pass
+            self.progress_reset_job = None
         self.progress.stop()
         self.progress.configure(mode="determinate", maximum=100, value=0)
         self.progress_var.set(text)
 
+    def _set_progress_then_idle(self, text: str, delay_ms: int = 3500) -> None:
+        self._set_progress_idle(text)
+        try:
+            self.progress_reset_job = self.root.after(delay_ms, lambda: self._set_progress_idle("就绪"))
+        except Exception:
+            self.progress_reset_job = None
+
     def _set_progress_busy(self, text: str) -> None:
+        if self.progress_reset_job is not None:
+            try:
+                self.root.after_cancel(self.progress_reset_job)
+            except Exception:
+                pass
+            self.progress_reset_job = None
         self.progress.configure(mode="indeterminate", value=0)
         self.progress.start(80)
         self.progress_var.set(text)
@@ -1116,6 +1501,12 @@ class PriceTrackerApp:
     def _apply_window_icon(self) -> None:
         try:
             self.root.iconbitmap(str(app_icon_path()))
+        except Exception:
+            pass
+
+    def _apply_toplevel_icon(self, window: Toplevel) -> None:
+        try:
+            window.iconbitmap(str(app_icon_path()))
         except Exception:
             pass
 
@@ -1131,6 +1522,12 @@ class PriceTrackerApp:
             return image
 
     def _set_progress_percent(self, percent: int, text: str) -> None:
+        if self.progress_reset_job is not None:
+            try:
+                self.root.after_cancel(self.progress_reset_job)
+            except Exception:
+                pass
+            self.progress_reset_job = None
         self.progress.stop()
         self.progress.configure(mode="determinate", maximum=100, value=max(0, min(100, percent)))
         self.progress_var.set(text)
@@ -1170,6 +1567,16 @@ class PriceTrackerApp:
     @staticmethod
     def _auto_ocr_cpu_threads() -> int:
         return RapidOcr(cpu_threads=0).cpu_threads
+
+    def _ocr_thread_choices(self) -> list[str]:
+        detected = self._auto_ocr_cpu_threads()
+        values = [detected, 1, 2, 3, 4, 6, 8, 12, 16]
+        cpu_count = os.cpu_count() or 1
+        current = int(getattr(self.config, "ocr_cpu_threads", 0) or 0)
+        if current > 0:
+            values.append(current)
+        choices = sorted({value for value in values if 1 <= value <= max(1, cpu_count)})
+        return [str(value) for value in choices] + ["自动"]
 
     @staticmethod
     def _ocr_threads_display_value(value: int) -> str:
@@ -1563,7 +1970,7 @@ class PriceTrackerApp:
         ).pack(anchor="w")
         toolbar = Frame(self.content)
         toolbar.pack(fill=X, pady=(12, 10))
-        Button(toolbar, text="截图识别", command=lambda: self.start_area_capture(restore_after=True)).pack(side=LEFT)
+        Button(toolbar, text="截图识别", command=self.start_area_capture).pack(side=LEFT)
         Label(toolbar, text="框选后会先显示截图，再自动识别内容。").pack(side=LEFT, padx=(12, 0))
         if not self._should_update_ocr_review_page():
             Label(
@@ -1857,7 +2264,7 @@ class PriceTrackerApp:
         header = Frame(self.content)
         header.pack(fill=X)
         Label(header, text=title, font=("Microsoft YaHei UI", self.config.font_size + 8, "bold")).pack(side=LEFT)
-        Label(header, textvariable=self.status_var).pack(side=RIGHT)
+        self._build_version_status_widget(header).pack(side=RIGHT)
 
         filters = Frame(self.content)
         filters.pack(fill=X, pady=(18, 12))
@@ -2118,7 +2525,7 @@ class PriceTrackerApp:
         provider = Combobox(
             row,
             textvariable=self.ocr_provider_var,
-            values=["CPU", "自动", "GPU DirectML", "GPU CUDA"],
+            values=["GPU DirectML", "GPU CUDA", "自动", "CPU"],
             state="readonly",
         )
         provider.pack(side=LEFT, fill=X, expand=True)
@@ -2129,7 +2536,7 @@ class PriceTrackerApp:
         threads = Combobox(
             row,
             textvariable=self.ocr_cpu_threads_var,
-            values=["自动", "1", "2", "3", "4", "6", "8"],
+            values=self._ocr_thread_choices(),
             state="readonly",
         )
         threads.pack(side=LEFT, fill=X, expand=True)
@@ -2175,7 +2582,13 @@ class PriceTrackerApp:
 
         update_box = LabelFrame(body, text="软件更新", padx=14, pady=12)
         update_box.pack(fill=X, pady=(16, 0))
-        Label(update_box, text="更新地址（从上到下依次尝试）", anchor="w").pack(anchor="w")
+        Label(
+            update_box,
+            text="更新地址（按顺序尝试；Gitee 固定用于版本检查，GitHub 可作为备用源）",
+            foreground="#667085",
+            justify=LEFT,
+            wraplength=760,
+        ).pack(anchor="w", fill=X)
         source_row = Frame(update_box)
         source_row.pack(fill=X, pady=(6, 0))
         source_list = Listbox(source_row, height=4, exportselection=False)
@@ -2203,7 +2616,16 @@ class PriceTrackerApp:
             offvalue="0",
             command=self.save_inline_settings,
         ).pack(anchor="w")
-        Button(update_box, text="检查更新", command=self.check_for_updates).pack(anchor="w", pady=(8, 0))
+        update_actions = Frame(update_box)
+        update_actions.pack(anchor="w", pady=(8, 0))
+        Button(update_actions, text="检查更新", command=self.check_for_updates).pack(side=LEFT)
+        self.manual_download_button = Button(
+            update_actions,
+            text="手动下载最新版",
+            command=self.open_latest_manual_download,
+        )
+        self.manual_download_button.pack(side=LEFT, padx=(8, 0))
+        self._set_manual_download_button_enabled(False)
 
         realtime_sync_box = LabelFrame(body, text="实时价格同步", padx=14, pady=12)
         realtime_sync_box.pack(fill=X, pady=(16, 0))
@@ -2268,8 +2690,18 @@ class PriceTrackerApp:
         if listbox is None:
             return
         listbox.delete(0, END)
-        for source in self._split_update_sources(self.settings_manifest_var.get()):
-            listbox.insert(END, source)
+        listbox.insert(END, GITEE_UPDATE_MANIFEST_URL)
+        try:
+            listbox.itemconfig(0, foreground="#667085")
+        except Exception:
+            pass
+        sources = self._split_update_sources(self.settings_manifest_var.get())
+        if not sources and not getattr(self.config, "update_sources_configured", False):
+            sources = [GITHUB_UPDATE_MANIFEST_URL]
+            self.settings_manifest_var.set(GITHUB_UPDATE_MANIFEST_URL)
+        for source in sources:
+            if source != GITEE_UPDATE_MANIFEST_URL:
+                listbox.insert(END, source)
         if listbox.size() > 0:
             listbox.selection_set(0)
         self.update_source_var.set("")
@@ -2278,7 +2710,12 @@ class PriceTrackerApp:
         listbox = self.update_sources_listbox
         if listbox is None:
             return self._split_update_sources(self.settings_manifest_var.get())
-        return [str(listbox.get(index)).strip() for index in range(listbox.size()) if str(listbox.get(index)).strip()]
+        values: list[str] = []
+        for index in range(listbox.size()):
+            value = str(listbox.get(index)).strip()
+            if value and value != GITEE_UPDATE_MANIFEST_URL:
+                values.append(value)
+        return values
 
     def _selected_update_source_index(self) -> int | None:
         listbox = self.update_sources_listbox
@@ -2289,6 +2726,7 @@ class PriceTrackerApp:
 
     def _save_update_source_list(self) -> None:
         self.settings_manifest_var.set("\n".join(self._update_source_values()))
+        self.config.update_sources_configured = True
         self.save_inline_settings()
 
     def _on_update_source_selected(self, _event=None) -> None:
@@ -2303,9 +2741,15 @@ class PriceTrackerApp:
         value = self.update_source_var.get().strip()
         if listbox is None or not value:
             return
+        if value == GITEE_UPDATE_MANIFEST_URL:
+            listbox.selection_clear(0, END)
+            listbox.selection_set(0)
+            listbox.see(0)
+            self.update_source_var.set("")
+            return
         existing = self._update_source_values()
         if value in existing:
-            index = existing.index(value)
+            index = existing.index(value) + 1
             listbox.selection_clear(0, END)
             listbox.selection_set(index)
             listbox.see(index)
@@ -2320,6 +2764,9 @@ class PriceTrackerApp:
         listbox = self.update_sources_listbox
         index = self._selected_update_source_index()
         if listbox is None or index is None:
+            return
+        if str(listbox.get(index)).strip() == GITEE_UPDATE_MANIFEST_URL:
+            self.progress_var.set("默认 Gitee 版本检查地址不能删除。")
             return
         listbox.delete(index)
         if listbox.size() > 0:
@@ -2340,7 +2787,7 @@ class PriceTrackerApp:
         if listbox is None or index is None:
             return
         new_index = index + offset
-        if new_index < 0 or new_index >= listbox.size():
+        if index == 0 or new_index <= 0 or new_index >= listbox.size():
             return
         value = listbox.get(index)
         listbox.delete(index)
@@ -2469,7 +2916,7 @@ class PriceTrackerApp:
             self.config.realtime_min_upvotes,
             maximum=999999,
         )
-        self.config.update_manifest = "\n".join(self._update_source_values()).strip()
+        self.config.update_manifest = normalize_extra_update_manifest("\n".join(self._update_source_values()))
         self.settings_manifest_var.set(self.config.update_manifest)
         self.config.auto_check_updates = self.auto_update_var.get() == "1"
         save_config(self.config)
@@ -2759,6 +3206,14 @@ class PriceTrackerApp:
             )
             all_rows.sort(key=lambda row: not row.pinned)
             rows = all_rows[(page - 1) * page_size : page * page_size]
+        try:
+            page_histories = self.db._price_histories_for_item_ids(
+                [row.item_id for row in rows],
+                limit=12,
+                min_realtime_upvotes=self._realtime_min_upvotes(),
+            )
+        except Exception:
+            page_histories = {}
         for index, row in enumerate(rows, start=(page - 1) * page_size + 1):
             display_amount = display_amount_for_item(
                 row.item_name, row.latest_amount, row.latest_currency, target_currency, rate, chaos_per_divine
@@ -2786,12 +3241,7 @@ class PriceTrackerApp:
             )
             history = [
                 convert_amount(record.amount, record.currency, row.latest_currency, rate, chaos_per_divine)
-                for record in self.db.get_price_history(
-                    row.item_name,
-                    limit=12,
-                    min_realtime_upvotes=self._realtime_min_upvotes(),
-                    prefer_realtime_if_available=True,
-                )
+                for record in page_histories.get(row.item_id, [])
             ]
             trend_values = history if len(history) >= 3 else []
             self.trend_data[row.item_name] = (trend_values, row.trend_percent)
@@ -2871,17 +3321,31 @@ class PriceTrackerApp:
             value = 0
         return f"{value:,}"
 
-    def _rating_button(self, parent, record_id: int, bg: str, size: int = 22, upvotes: int = 0):
+    @staticmethod
+    def _rating_label_text(vote_text: str, has_image: bool, force_text_icon: bool = False) -> str:
+        return f"👍 {vote_text}" if force_text_icon or not has_image else f" {vote_text}"
+
+    def _rating_button(
+        self,
+        parent,
+        record_id: int,
+        bg: str,
+        size: int = 22,
+        upvotes: int = 0,
+        force_text_icon: bool = False,
+    ):
         icon_name = "rating.png"
         voted = record_id in self.realtime_session_votes
         selected = self.realtime_session_votes.get(record_id) == 1
         light = bg.lower() in {"#10151d", "#000000"}
         image = self._rating_icon_image(icon_name, size=size, disabled=voted and not selected, light=light)
         vote_text = self._format_upvotes(upvotes)
+        has_image = bool(image)
+        label_text = self._rating_label_text(vote_text, has_image, force_text_icon=force_text_icon)
         label = Label(
             parent,
             image=image,
-            text=f" {max(0, int(upvotes or 0))}" if image else f"赞 {max(0, int(upvotes or 0))}",
+            text=label_text,
             compound=LEFT,
             fg="#dbeafe" if light else "#2563eb",
             bg="#e8fff1" if selected else bg,
@@ -2892,7 +3356,8 @@ class PriceTrackerApp:
             cursor="" if voted else "hand2",
             font=("Microsoft YaHei UI", max(9, int(size * 0.55)), "bold"),
         )
-        label.configure(text=f" {vote_text}" if image else f"赞{vote_text}")
+        label.configure(text=label_text)
+        label.image = image  # type: ignore[attr-defined]
         label._rating_button = True  # type: ignore[attr-defined]
         if not voted:
             label.bind("<Button-1>", lambda event, rid=record_id: self._vote_realtime_record(event, rid))
@@ -2914,6 +3379,28 @@ class PriceTrackerApp:
         self._rating_button(holder, record_id, bg, size=size, upvotes=upvotes).pack(side=LEFT)
         return True
 
+    def _render_rating_button_inline(
+        self,
+        parent,
+        record_id: int,
+        source: str,
+        bg: str,
+        size: int = 22,
+        upvotes: int = 0,
+        force_text_icon: bool = False,
+    ) -> bool:
+        if not self._rating_available(record_id, source):
+            return False
+        self._rating_button(
+            parent,
+            record_id,
+            bg,
+            size=size,
+            upvotes=upvotes,
+            force_text_icon=force_text_icon,
+        ).pack(side=LEFT)
+        return True
+
     def _clear_realtime_current_rating(self) -> None:
         holder = self.realtime_import_labels.get("current_rating")
         if holder is None:
@@ -2929,6 +3416,30 @@ class PriceTrackerApp:
         if recognized in {"神圣石", "崇高石", "混沌石"}:
             return recognized
         return canonical_currency(self.display_currency_var.get() or self.config.display_currency)
+
+    def _stats_trend_percent(self, item_name: str, target_currency: str) -> str:
+        try:
+            history = self.db.get_price_history(
+                item_name,
+                limit=12,
+                min_realtime_upvotes=self._realtime_min_upvotes(),
+                prefer_realtime_if_available=True,
+            )
+        except Exception:
+            return ""
+        return self._quick_price_trend(history, target_currency)
+
+    def _base_currency_pair_trend_percent(self, item_currency: str, target_currency: str) -> str:
+        try:
+            history = self.db.get_base_currency_pair_history(
+                item_currency,
+                target_currency,
+                limit=12,
+                min_realtime_upvotes=self._realtime_min_upvotes(),
+            )
+        except Exception:
+            return ""
+        return self._quick_price_trend(history, target_currency)
 
     def _vote_realtime_record(self, event, record_id: int) -> str:
         if record_id <= 0 or record_id in self.realtime_session_votes:
@@ -3496,8 +4007,12 @@ class PriceTrackerApp:
                     self.redis_sync_status_var.set(str(message))
                     self.status_var.set(str(message))
                 elif isinstance(event, tuple) and event[0] == "update_check_done":
-                    _kind, info, silent = event
-                    self._handle_update_check_result(info, bool(silent))
+                    _kind, info, silent, *rest = event
+                    token = int(rest[0]) if rest else 0
+                    self._handle_update_check_result(info, bool(silent), token)
+                elif isinstance(event, tuple) and event[0] == "manual_download_check_done":
+                    _kind, info = event
+                    self._handle_manual_download_check_result(info)
                 elif isinstance(event, tuple) and event[0] == "update_progress":
                     _kind, percent, url = event
                     self._set_progress_percent(percent, f"更新下载中 {percent}%：{url}")
@@ -3587,6 +4102,15 @@ class PriceTrackerApp:
         entry.bind("<Control-space>", lambda _event: self.destroy_focus_search_overlay())
         entry.bind("<Control-Key-space>", lambda _event: self.destroy_focus_search_overlay())
         self.focus_search_entry = entry
+        unit = Combobox(
+            search_row,
+            textvariable=self.display_currency_var,
+            values=["神圣石", "崇高石", "混沌石"],
+            width=7,
+            state="readonly",
+        )
+        unit.pack(side=LEFT, padx=(8, 0))
+        unit.bind("<<ComboboxSelected>>", self.on_focus_search_currency_change)
 
         result_box = Frame(container, bg="#ffffff")
         result_box.pack(fill=BOTH, expand=True, pady=(7, 0))
@@ -3619,6 +4143,13 @@ class PriceTrackerApp:
             entry.focus_force()
         except Exception:
             pass
+
+    def on_focus_search_currency_change(self, _event=None) -> None:
+        self.save_display_currency()
+        if self._focus_search_overlay_exists():
+            self.refresh_focus_search_results()
+            if self.focus_search_entry is not None:
+                self.root.after(10, lambda: self._focus_search_entry_force_focus(self.focus_search_entry))
 
     def _position_focus_search_overlay(self, height: int) -> None:
         overlay = self.focus_search_overlay
@@ -3787,7 +4318,7 @@ class PriceTrackerApp:
         ).pack(side=RIGHT)
 
         result_box = Frame(container, bg="#ffffff")
-        result_box.pack(fill=BOTH, expand=True, pady=(8, 0))
+        result_box.pack(fill=X, expand=False, pady=(8, 0))
         result_canvas = Canvas(result_box, bg="#ffffff", highlightthickness=0, takefocus=1)
         result_canvas.bind("<Escape>", lambda _event: self.destroy_screenshot_lookup_overlay())
         result_scrollbar = ttk.Scrollbar(result_box, orient="vertical", command=result_canvas.yview)
@@ -3800,6 +4331,7 @@ class PriceTrackerApp:
         result_canvas.bind("<Configure>", lambda event: result_canvas.itemconfigure(result_window, width=event.width))
         result_canvas.configure(yscrollcommand=result_scrollbar.set)
         result_canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        self.screenshot_lookup_result_box = result_box
         self.screenshot_lookup_results = result_inner
         self.screenshot_lookup_results_canvas = result_canvas
         self.screenshot_lookup_result_window = result_window
@@ -3924,17 +4456,20 @@ class PriceTrackerApp:
                 justify=LEFT,
             ).pack(anchor="w", pady=(6, 0))
             self._bind_screenshot_lookup_drag_recursive(box)
-            self._configure_screenshot_lookup_scroll(68, False)
-            self._position_screenshot_lookup_overlay(150)
+            empty_height = self._measure_screenshot_lookup_content_height(min_height=58)
+            self._configure_screenshot_lookup_scroll(empty_height, False)
+            self._position_screenshot_lookup_overlay(self._screenshot_lookup_overlay_height(empty_height, 0, False))
             self._show_screenshot_lookup_overlay(overlay)
             return
 
         for index, (row_data, confidence, raw_text) in enumerate(rows):
             self._render_screenshot_lookup_row(index, row_data, confidence, raw_text)
         visible_rows = min(len(rows), 5)
-        result_height = self._measure_screenshot_lookup_result_height(visible_rows)
+        result_height = self._measure_screenshot_lookup_result_height(visible_rows, len(rows) > 5)
         self._configure_screenshot_lookup_scroll(result_height, len(rows) > 5)
-        self._position_screenshot_lookup_overlay(104 + result_height)
+        self._position_screenshot_lookup_overlay(
+            self._screenshot_lookup_overlay_height(result_height, len(rows), len(rows) > 5)
+        )
         self._show_screenshot_lookup_overlay(overlay)
         self._focus_screenshot_lookup_overlay(overlay)
 
@@ -3967,7 +4502,8 @@ class PriceTrackerApp:
             font=("Microsoft YaHei UI", 13, "bold"),
             anchor="w",
         ).pack(anchor="w")
-        subtitle = row_data.source
+        updated = self._format_time(row_data.latest_at)
+        subtitle = f"{row_data.source}  {updated}" if updated else row_data.source
         Label(name_box, text=subtitle, fg="#8a97a6", bg="#ffffff", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(1, 0))
 
         target_currency = self.display_currency_var.get() or self.config.display_currency
@@ -4017,16 +4553,36 @@ class PriceTrackerApp:
             self._reset_page_and_refresh()
         self.destroy_screenshot_lookup_overlay()
 
-    def _measure_screenshot_lookup_result_height(self, visible_rows: int) -> int:
+    def _measure_screenshot_lookup_content_height(self, min_height: int = 1) -> int:
         if self.screenshot_lookup_results is None:
-            return max(1, visible_rows) * 68
+            return min_height
         try:
             self.screenshot_lookup_results.update_idletasks()
-            children = self.screenshot_lookup_results.winfo_children()[:visible_rows]
+            children = self.screenshot_lookup_results.winfo_children()
             measured = sum(max(child.winfo_reqheight(), child.winfo_height()) for child in children)
         except Exception:
             measured = 0
-        return max(max(1, visible_rows) * 68, measured + 6)
+        return max(min_height, measured + 2)
+
+    def _measure_screenshot_lookup_result_height(self, visible_rows: int, scrollable: bool = False) -> int:
+        min_row_height = 60 if not scrollable else 66
+        content_height = self._measure_screenshot_lookup_content_height(min_height=max(1, visible_rows) * min_row_height)
+        if scrollable:
+            return min(340, max(max(1, visible_rows) * 66, content_height + 4))
+        return max(max(1, visible_rows) * 56, content_height)
+
+    @staticmethod
+    def _screenshot_lookup_overlay_height(result_height: int, row_count: int, scrollable: bool) -> int:
+        chrome = 76
+        if row_count <= 0:
+            bottom_padding = 12
+        elif scrollable:
+            bottom_padding = 18
+        elif row_count <= 2:
+            bottom_padding = 10
+        else:
+            bottom_padding = 14
+        return max(118, int(chrome + result_height + bottom_padding))
 
     def _configure_screenshot_lookup_scroll(self, height: int, scrollable: bool) -> None:
         canvas = self.screenshot_lookup_results_canvas
@@ -4034,6 +4590,9 @@ class PriceTrackerApp:
         if canvas is None or scrollbar is None:
             return
         canvas.configure(height=height)
+        result_box = getattr(self, "screenshot_lookup_result_box", None)
+        if result_box is not None:
+            result_box.pack_configure(fill=BOTH if scrollable else X, expand=False)
         if scrollable:
             scrollbar.pack(side=RIGHT, fill=Y)
             self._bind_focus_result_wheel_recursive(canvas, canvas)
@@ -4084,6 +4643,7 @@ class PriceTrackerApp:
         self.screenshot_lookup_container = None
         self.screenshot_lookup_container_window = None
         self.screenshot_lookup_results = None
+        self.screenshot_lookup_result_box = None
         self.screenshot_lookup_results_canvas = None
         self.screenshot_lookup_result_window = None
         self.screenshot_lookup_results_scrollbar = None
@@ -4305,6 +4865,7 @@ class PriceTrackerApp:
         self.status_var.set(f"已保存截图价格：{item} = {amount:g} {currency}")
 
     def quick_price_from_clipboard(self, raw_text: str | None = None) -> None:
+        self._quick_price_anchor = self._cursor_screen_position()
         if raw_text is None:
             try:
                 self._quick_price_foreground_hwnd = int(ctypes.windll.user32.GetForegroundWindow())
@@ -4353,9 +4914,15 @@ class PriceTrackerApp:
             min_realtime_upvotes=self._realtime_min_upvotes(),
             prefer_realtime_if_available=True,
         )
-        trend = trend_percent([record.amount for record in history])
+        trend = self._quick_price_trend(history, stats.latest_currency)
         price = f"{stats.latest_amount:g} {stats.latest_currency}"
-        subtitle = item.rarity or "本地物价"
+        subtitle_parts = [item.rarity or "本地物价"]
+        if stats.latest_source:
+            subtitle_parts.append(stats.latest_source)
+        updated = self._format_time(stats.latest_at)
+        if updated:
+            subtitle_parts.append(updated)
+        subtitle = "  ·  ".join(subtitle_parts)
         self._set_progress_idle(f"快速查价：{stats.item_name} {price}")
         self._show_quick_price_overlay(
             stats.item_name,
@@ -4366,6 +4933,116 @@ class PriceTrackerApp:
             stats.latest_source,
             stats.realtime_upvotes,
         )
+
+    def _quick_price_trend(self, history: list[ParsedPrice] | list[object], target_currency: str) -> str:
+        if len(history) < 2:
+            return ""
+        try:
+            rate = self.db.get_exalted_per_divine()
+            chaos_per_divine = self.db.get_chaos_per_divine()
+            values = [
+                convert_amount(
+                    float(getattr(record, "amount")),
+                    str(getattr(record, "currency")),
+                    target_currency,
+                    rate,
+                    chaos_per_divine,
+                )
+                for record in history
+            ]
+        except Exception:
+            values = [float(getattr(record, "amount", 0.0)) for record in history]
+        return trend_percent(values)
+
+    def _cursor_screen_position(self) -> tuple[int, int]:
+        try:
+            point = wintypes.POINT()
+            if ctypes.windll.user32.GetCursorPos(ctypes.byref(point)):
+                return int(point.x), int(point.y)
+        except Exception:
+            pass
+        try:
+            return int(self.root.winfo_pointerx()), int(self.root.winfo_pointery())
+        except Exception:
+            return 0, 0
+
+    def _virtual_screen_bounds(self, widget) -> tuple[int, int, int, int]:
+        try:
+            user32 = ctypes.windll.user32
+            left = int(user32.GetSystemMetrics(76))
+            top = int(user32.GetSystemMetrics(77))
+            width = int(user32.GetSystemMetrics(78))
+            height = int(user32.GetSystemMetrics(79))
+            if width > 0 and height > 0:
+                return left, top, left + width, top + height
+        except Exception:
+            pass
+        return 0, 0, int(widget.winfo_screenwidth()), int(widget.winfo_screenheight())
+
+    @staticmethod
+    def _quick_price_overlay_position(
+        pointer: tuple[int, int] | None,
+        bounds: tuple[int, int, int, int],
+        width: int,
+        height: int,
+    ) -> tuple[int, int]:
+        screen_left, screen_top, screen_right, screen_bottom = bounds
+        margin = 24
+        max_x = max(screen_left + margin, screen_right - width - margin)
+        max_y = max(screen_top + margin, screen_bottom - height - margin)
+
+        if pointer is not None:
+            pointer_x, pointer_y = pointer
+            pointer_is_inside = screen_left <= pointer_x <= screen_right and screen_top <= pointer_y <= screen_bottom
+            pointer_is_empty_fallback = pointer_x == 0 and pointer_y == 0
+            if pointer_is_inside and not pointer_is_empty_fallback:
+                x = max(screen_left + margin, min(pointer_x + margin, max_x))
+                y = max(screen_top + margin, min(pointer_y + margin, max_y))
+                return x, y
+
+        screen_width = max(1, screen_right - screen_left)
+        screen_height = max(1, screen_bottom - screen_top)
+        fallback_x = screen_left + max(margin, (screen_width - width) // 2)
+        fallback_y = screen_top + max(margin, min(120, (screen_height - height) // 3))
+        return max(screen_left + margin, min(fallback_x, max_x)), max(screen_top + margin, min(fallback_y, max_y))
+
+    def _position_toplevel_absolute(self, window: Toplevel, x: int, y: int, width: int, height: int) -> None:
+        geometry = f"{width}x{height}+{int(x)}+{int(y)}"
+        try:
+            window.geometry(geometry)
+            window.update_idletasks()
+        except Exception:
+            pass
+        try:
+            user32 = ctypes.windll.user32
+            user32.SetWindowPos.argtypes = [
+                wintypes.HWND,
+                wintypes.HWND,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_int,
+                ctypes.c_uint,
+            ]
+            user32.SetWindowPos.restype = wintypes.BOOL
+            hwnd = wintypes.HWND(int(window.winfo_id()))
+            hwnd_topmost = wintypes.HWND(-1)
+            swp_noactivate = 0x0010
+            swp_showwindow = 0x0040
+            user32.SetWindowPos(
+                hwnd,
+                hwnd_topmost,
+                int(x),
+                int(y),
+                int(width),
+                int(height),
+                swp_noactivate | swp_showwindow,
+            )
+        except Exception:
+            try:
+                window.geometry(geometry)
+            except Exception:
+                pass
 
     def _show_quick_price_overlay(
         self,
@@ -4383,6 +5060,10 @@ class PriceTrackerApp:
         if overlay is None or not self._toplevel_exists(overlay):
             overlay = Toplevel(self.root)
             self.quick_price_overlay = overlay
+            try:
+                overlay.withdraw()
+            except Exception:
+                pass
             overlay.overrideredirect(True)
             overlay.attributes("-topmost", True)
             try:
@@ -4463,22 +5144,30 @@ class PriceTrackerApp:
         if rating_frame is not None:
             for child in rating_frame.winfo_children():
                 child.destroy()
-            self._render_rating_controls(
+            self._render_rating_button_inline(
                 rating_frame,
                 rating_record_id,
                 rating_source,
                 "#10151d",
                 size=24,
                 upvotes=rating_upvotes,
+                force_text_icon=True,
             )
         overlay.update_idletasks()
         frame = labels.get("frame")
         requested_height = frame.winfo_reqheight() + 8 if frame is not None else min_height
         height = max(min_height, min(380, requested_height))
-        x = max(24, min(self.root.winfo_pointerx() + 24, overlay.winfo_screenwidth() - width - 24))
-        y = max(24, min(self.root.winfo_pointery() + 24, overlay.winfo_screenheight() - height - 24))
-        overlay.geometry(f"{width}x{height}+{x}+{y}")
-        overlay.lift()
+        pointer = self._quick_price_anchor or self._cursor_screen_position()
+        screen_left, screen_top, screen_right, screen_bottom = self._virtual_screen_bounds(overlay)
+        x, y = self._quick_price_overlay_position(pointer, (screen_left, screen_top, screen_right, screen_bottom), width, height)
+        self._position_toplevel_absolute(overlay, x, y, width, height)
+        try:
+            overlay.deiconify()
+            overlay.lift()
+        except Exception:
+            pass
+        self.root.after(30, lambda ox=overlay, px=x, py=y, ow=width, oh=height: self._reposition_quick_price_overlay_once(ox, px, py, ow, oh))
+        self.root.after(120, lambda ox=overlay, px=x, py=y, ow=width, oh=height: self._reposition_quick_price_overlay_once(ox, px, py, ow, oh))
         self.root.after(40, self._restore_quick_price_foreground)
         if self.quick_price_overlay_hide_job is not None:
             try:
@@ -4490,6 +5179,10 @@ class PriceTrackerApp:
         token = self.quick_price_overlay_watch_token
         left_down = self._left_mouse_down()
         self.root.after(60, lambda: self._watch_quick_price_overlay(overlay, time.monotonic(), not left_down, left_down, token))
+
+    def _reposition_quick_price_overlay_once(self, overlay: Toplevel, x: int, y: int, width: int, height: int) -> None:
+        if overlay is self.quick_price_overlay and self._toplevel_exists(overlay):
+            self._position_toplevel_absolute(overlay, x, y, width, height)
 
     @staticmethod
     def _toplevel_exists(window: Toplevel) -> bool:
@@ -4509,6 +5202,7 @@ class PriceTrackerApp:
         self.quick_price_overlay_watch_token += 1
         self.quick_price_overlay = None
         self.quick_price_overlay_labels = {}
+        self._quick_price_anchor = None
         if overlay is not None and self._toplevel_exists(overlay):
             overlay.destroy()
 
@@ -4905,7 +5599,11 @@ class PriceTrackerApp:
             prefix = "当前记录"
         source = stats.latest_source or "未知来源"
         updated = self._format_time(stats.latest_at)
-        parts = [f"{prefix}：{amount:g} {target_currency}", f"来源：{source}"]
+        if item_currency in base_currencies and target_currency in base_currencies:
+            trend = self._base_currency_pair_trend_percent(item_currency, target_currency)
+        else:
+            trend = self._stats_trend_percent(stats.item_name, target_currency)
+        parts = [f"{prefix}：{amount:g} {target_currency}", f"趋势：{trend or '暂无'}", f"来源：{source}"]
         if updated:
             parts.append(updated)
         label.configure(text=" · ".join(parts))
@@ -4975,12 +5673,7 @@ class PriceTrackerApp:
             self.status_var.set("截图识别正在进行中。")
             return
         self._area_capture_active = True
-        self._restore_after_area_capture = restore_after or (
-            self._should_update_ocr_review_page()
-            and getattr(self, "current_page_name", "") == "ocr"
-            and self.root.state() != "withdrawn"
-            and bool(self.root.winfo_viewable())
-        )
+        self._restore_after_area_capture = bool(restore_after)
         self.root.withdraw()
         self.root.update_idletasks()
         self.root.after(25, self._capture_for_selection)
@@ -5382,43 +6075,90 @@ class PriceTrackerApp:
 
     def check_for_updates(self, silent: bool = False) -> None:
         if self.updating or self.update_checking:
+            if self.update_checking and time.monotonic() - float(getattr(self, "update_check_started_at", 0.0) or 0.0) > 12:
+                self.update_checking = False
+                self.update_check_token = int(getattr(self, "update_check_token", 0)) + 1
+            else:
+                if not silent:
+                    self.progress_var.set("更新正在进行中，请稍候...")
+                return
+        if self.updating:
             if not silent:
                 self.progress_var.set("更新正在进行中，请稍候...")
             return
         self.update_checking = True
+        self.update_check_started_at = time.monotonic()
+        self.update_check_token = int(getattr(self, "update_check_token", 0)) + 1
+        token = self.update_check_token
+        self.latest_update_info = None
+        self._set_manual_download_button_enabled(False)
         self._set_version_update_status("检查中")
         if not silent:
-            self.progress_var.set("正在检查更新...")
-        threading.Thread(target=self._check_update_worker, args=(silent,), daemon=True).start()
+            self._set_progress_busy("正在检查更新...")
+        try:
+            self.root.after(12000, lambda current=token: self._watch_update_check_timeout(current))
+        except Exception:
+            pass
+        threading.Thread(target=self._check_update_worker, args=(silent, token), daemon=True).start()
 
-    def _check_update_worker(self, silent: bool = False) -> None:
-        info = check_update(self.config.update_manifest)
-        self.events.put(("update_check_done", info, silent))
+    def _check_update_worker(self, silent: bool = False, token: int = 0) -> None:
+        try:
+            info = check_update(effective_update_manifest(self.config.update_manifest), timeout=4.0)
+        except Exception as exc:
+            info = UpdateInfo(False, __version__, __version__, "", "", f"检查失败：{exc}")
+        if token:
+            self._post_event(("update_check_done", info, silent, token))
+        else:
+            self._post_event(("update_check_done", info, silent))
 
-    def _handle_update_check_result(self, info: UpdateInfo, silent: bool = False) -> None:
+    def _watch_update_check_timeout(self, token: int) -> None:
+        if not self.update_checking or token != int(getattr(self, "update_check_token", 0)):
+            return
         self.update_checking = False
+        self.update_check_started_at = 0.0
+        self.update_check_token = token + 1
+        self.latest_update_info = None
+        self._set_manual_download_button_enabled(False)
+        self._set_version_update_status("检查失败")
+        self._set_progress_then_idle("检查更新超时，请稍后再试")
+        self.status_var.set("检查更新超时，请稍后再试。")
+
+    def _handle_update_check_result(self, info: UpdateInfo, silent: bool = False, token: int = 0) -> None:
+        if token and token != int(getattr(self, "update_check_token", 0)):
+            return
+        self.update_checking = False
+        self.update_check_started_at = 0.0
+        self.latest_update_info = info if info.available else None
+        self._set_manual_download_button_enabled(bool(info.available and self._first_manual_update_url(info)))
         if info.available:
-            self._set_version_update_status("有更新")
+            manual_url = self._first_manual_update_url(info)
+            status = "有更新，点击手动下载" if manual_url else "有更新，点击下载"
+            self._set_version_update_status(status, available=True)
+            if not silent:
+                self._set_progress_then_idle(f"检查更新：发现新版本 {info.latest_version}")
         elif "失败" in info.message or "未配置" in info.message:
             self._set_version_update_status("检查失败")
+            if not silent:
+                self._set_progress_then_idle("检查更新失败")
         else:
             self._set_version_update_status("最新版")
+            if not silent:
+                self._set_progress_then_idle("检查更新：当前已是最新版")
+        manual_url = self._first_manual_update_url(info)
+        if info.available and manual_url:
+            if not silent:
+                self._show_update_available_dialog(info)
+            return
         if info.available and info.download_url:
-            notes = "\n".join(f"- {item}" for item in info.notes[:6])
-            note_text = f"\n\n更新内容：\n{notes}" if notes else ""
-            if messagebox.askyesno(
-                "发现更新",
-                f"{info.message}\n当前：{info.current_version}\n最新：{info.latest_version}{note_text}\n\n下载并安装？",
-            ):
-                self.updating = True
-                self._set_progress_percent(0, "正在下载更新...")
-                threading.Thread(target=self._download_update_worker, args=(info,), daemon=True).start()
+            if not silent:
+                self._show_update_available_dialog(info)
             return
         if silent:
             return
         messagebox.showinfo(
             "检查更新",
             f"{info.message}\n当前版本：{info.current_version}\n最新版本：{info.latest_version}",
+            parent=self.root,
         )
 
     def _download_update_worker(self, info: UpdateInfo) -> None:
@@ -5428,7 +6168,7 @@ class PriceTrackerApp:
         try:
             app_dir = Path(sys.executable).resolve().parent if getattr(sys, "frozen", False) else None
             result = download_update(
-                self.config.update_manifest,
+                effective_update_manifest(self.config.update_manifest),
                 info,
                 (app_dir / "updates") if app_dir is not None else self.config.data_path / "updates",
                 progress=progress,
@@ -5576,7 +6316,7 @@ class PriceTrackerApp:
         self.realtime_sync_saved_count = 0
         self.realtime_sync_skipped_count = 0
         self.realtime_sync_remote_signatures = self.db.get_realtime_remote_signatures()
-        self._set_progress_percent(0, "正在同步实时价格，请稍候...")
+        self._set_progress_busy("正在同步实时价格，请稍候...")
         self.status_var.set("实时价格同步中...")
         threading.Thread(target=self._realtime_sync_worker, daemon=True).start()
 
@@ -5644,13 +6384,11 @@ class PriceTrackerApp:
             )
             self.realtime_sync_remote_signatures[record.remote_key] = signature
             self.realtime_sync_saved_count += 1
-        self._set_progress_percent(
-            0,
-            f"实时价格同步中... 已拉取 {self.realtime_sync_seen_count} 条，更新 {self.realtime_sync_saved_count} 条。",
-        )
-        self.status_var.set(
-            f"实时价格同步中... 已拉取 {self.realtime_sync_seen_count} 条，更新 {self.realtime_sync_saved_count} 条。"
-        )
+        text = f"实时价格同步中... 已拉取 {self.realtime_sync_seen_count} 条，更新 {self.realtime_sync_saved_count} 条。"
+        progress_var = getattr(self, "progress_var", None)
+        if progress_var is not None:
+            progress_var.set(text)
+        self.status_var.set(text)
 
     def _finish_realtime_sync(self) -> None:
         if self.realtime_sync_uses_free_use and self.realtime_sync_free_uses > 0:
@@ -5681,7 +6419,7 @@ class PriceTrackerApp:
             return
         self._record_economy_sync_attempt()
         self.syncing = True
-        self._set_progress_percent(0, "正在同步 poe2db 经济数据，请稍候...")
+        self._set_progress_busy("正在同步 poe2db 经济数据，请稍候...")
         self.status_var.set("同步中...")
         threading.Thread(target=self._sync_worker, daemon=True).start()
 

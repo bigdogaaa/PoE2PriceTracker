@@ -23,6 +23,8 @@ class UpdateInfo:
     manifest_location: str = ""
     size: int = 0
     notes: tuple[str, ...] = ()
+    download_urls: tuple[str, ...] = ()
+    manual_urls: tuple[str, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -33,9 +35,9 @@ class DownloadedUpdate:
     message: str
 
 
-def _read_manifest(location: str) -> dict:
+def _read_manifest(location: str, timeout: float = 5.0) -> dict:
     if location.startswith(("http://", "https://")):
-        with urllib.request.urlopen(location, timeout=12) as response:
+        with urllib.request.urlopen(location, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8-sig"))
     path = Path(location)
     with path.open("r", encoding="utf-8-sig") as fh:
@@ -72,6 +74,43 @@ def _resolve_download_url(manifest_location: str, download_url: str) -> str:
     if manifest_location.startswith(("http://", "https://")):
         return urljoin(manifest_location, download_url)
     return str((Path(manifest_location).parent / download_url).resolve())
+
+
+def _manifest_download_urls(manifest: dict) -> tuple[str, ...]:
+    urls: list[str] = []
+
+    def add_url(value) -> None:
+        if isinstance(value, dict):
+            value = value.get("download_url") or value.get("url")
+        text = str(value or "").strip()
+        if text and text not in urls:
+            urls.append(text)
+
+    add_url(manifest.get("download_url") or manifest.get("url"))
+    for key in ("download_urls", "mirrors"):
+        raw = manifest.get(key, ())
+        if isinstance(raw, (list, tuple)):
+            for item in raw:
+                add_url(item)
+    return tuple(urls)
+
+
+def _manifest_manual_urls(manifest: dict) -> tuple[str, ...]:
+    urls: list[str] = []
+    raw = manifest.get("manual_urls") or manifest.get("manual_download_urls") or ()
+    if isinstance(raw, str):
+        raw = [raw]
+    if not isinstance(raw, (list, tuple)):
+        return ()
+    for item in raw:
+        if isinstance(item, dict):
+            value = item.get("url") or item.get("href")
+        else:
+            value = item
+        text = str(value or "").strip()
+        if text and text not in urls:
+            urls.append(text)
+    return tuple(urls)
 
 
 def _download_name(url: str) -> str:
@@ -131,20 +170,22 @@ def _stage_executable_near_current(executable: Path, app_dir: Path) -> Path:
     return target
 
 
-def check_update(manifest_location: str) -> UpdateInfo:
+def check_update(manifest_location: str, timeout: float = 5.0) -> UpdateInfo:
     locations = _manifest_locations(manifest_location)
     if not locations:
         return UpdateInfo(False, __version__, __version__, "", "", "未配置更新地址。")
     errors: list[str] = []
     for location in locations:
         try:
-            manifest = _manifest_payload(_read_manifest(location))
+            manifest = _manifest_payload(_read_manifest(location, timeout=timeout))
         except Exception as exc:
             errors.append(f"{location}: {exc}")
             continue
 
         latest = str(manifest.get("version", "0.0.0"))
-        download_url = str(manifest.get("download_url") or manifest.get("url") or "")
+        download_urls = _manifest_download_urls(manifest)
+        download_url = download_urls[0] if download_urls else ""
+        manual_urls = _manifest_manual_urls(manifest)
         sha256 = str(manifest.get("sha256", ""))
         try:
             size = max(0, int(manifest.get("size", 0) or 0))
@@ -159,7 +200,19 @@ def check_update(manifest_location: str) -> UpdateInfo:
             notes = ()
         available = _version_tuple(latest) > _version_tuple(__version__)
         message = "发现新版本。" if available else "当前已是最新版本。"
-        return UpdateInfo(available, __version__, latest, download_url, sha256, message, location, size, notes)
+        return UpdateInfo(
+            available,
+            __version__,
+            latest,
+            download_url,
+            sha256,
+            message,
+            location,
+            size,
+            notes,
+            download_urls,
+            manual_urls,
+        )
     return UpdateInfo(False, __version__, __version__, "", "", f"检查更新失败：{'; '.join(errors[:3])}")
 
 
@@ -178,7 +231,17 @@ def download_update(
     if version_dir.exists():
         shutil.rmtree(version_dir)
     version_dir.mkdir(parents=True, exist_ok=True)
-    _download_file(url, package_path, progress)
+    errors: list[str] = []
+    for raw_url in info.download_urls or (info.download_url.strip(),):
+        url = _resolve_download_url(location, raw_url.strip())
+        package_path = version_dir / _download_name(url)
+        try:
+            _download_file(url, package_path, progress)
+            break
+        except Exception as exc:
+            errors.append(f"{url}: {exc}")
+    else:
+        raise RuntimeError(f"update package download failed: {'; '.join(errors[:3])}")
     if info.size and package_path.stat().st_size != info.size:
         raise ValueError(f"更新包大小校验失败：期望 {info.size}，实际 {package_path.stat().st_size}")
 

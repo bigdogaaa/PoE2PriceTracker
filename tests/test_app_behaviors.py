@@ -1,9 +1,12 @@
 import shutil
 import uuid
+import queue
+import time
 from pathlib import Path
 from types import SimpleNamespace
 
 from poe2_price_tracker.app import PriceTrackerApp
+from poe2_price_tracker import app as app_module
 from poe2_price_tracker.db import PriceDatabase
 from poe2_price_tracker.market_exchange import ParsedMarketExchange, ParsedRealtimePrice
 from poe2_price_tracker.parser import ParsedItemPrice
@@ -99,12 +102,51 @@ def test_upvote_count_uses_thousands_separator():
     assert PriceTrackerApp._format_upvotes(1200345) == "1,200,345"
 
 
+def test_rating_fallback_text_keeps_icon_marker():
+    assert PriceTrackerApp._rating_label_text("12", False) == "👍 12"
+    assert PriceTrackerApp._rating_label_text("12", True) == " 12"
+    assert PriceTrackerApp._rating_label_text("12", True, force_text_icon=True) == "👍 12"
+
+
 def test_realtime_rating_available_uses_record_id_not_display_source():
     app = PriceTrackerApp.__new__(PriceTrackerApp)
 
     assert app._rating_available(1, "")
     assert app._rating_available(1, "同步来源")
     assert not app._rating_available(0, "实时价格导入-买入")
+
+
+def test_quick_price_overlay_position_follows_pointer():
+    assert PriceTrackerApp._quick_price_overlay_position((320, 240), (0, 0, 1920, 1080), 460, 260) == (344, 264)
+
+
+def test_quick_price_overlay_position_avoids_empty_pointer_fallback():
+    x, y = PriceTrackerApp._quick_price_overlay_position((0, 0), (0, 0, 1920, 1080), 460, 260)
+
+    assert (x, y) != (24, 24)
+    assert x > 300
+    assert y >= 24
+
+
+def test_screenshot_lookup_overlay_height_is_compact_for_few_rows():
+    one_row = PriceTrackerApp._screenshot_lookup_overlay_height(62, 1, False)
+    five_rows = PriceTrackerApp._screenshot_lookup_overlay_height(330, 5, False)
+    scrollable = PriceTrackerApp._screenshot_lookup_overlay_height(340, 8, True)
+
+    assert one_row < 160
+    assert five_rows > one_row
+    assert scrollable >= five_rows
+
+
+def test_quick_price_trend_converts_history_to_latest_currency():
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    app.db = _Db()
+    history = [
+        SimpleNamespace(amount=1, currency="神圣石"),
+        SimpleNamespace(amount=200, currency="崇高石"),
+    ]
+
+    assert app._quick_price_trend(history, "崇高石") == "+100%"
 
 
 def test_version_status_text_appends_status_after_version():
@@ -210,6 +252,162 @@ def test_realtime_current_price_uses_recognized_currency_unit_for_comparison():
         app._update_realtime_current_price_label()
 
         assert "当前兑换：181 崇高石" in label.text
+        assert "趋势：暂无" in label.text
         assert "实时价格导入-卖出" in label.text
+        assert "2026-01-02" in label.text
     finally:
         db.close()
+
+
+def test_realtime_current_price_prefers_valid_realtime_records_for_stats_and_trend():
+    db = PriceDatabase(Path(":memory:"))
+    try:
+        db.add_price_record(
+            "测试物品",
+            999,
+            "神圣石",
+            "poe2db",
+            captured_at="2026-01-03T00:00:00+00:00",
+        )
+        db.upsert_synced_realtime_price_record(
+            remote_key="remote:item:1",
+            item_name="测试物品",
+            side="卖出",
+            amount=10,
+            currency="崇高石",
+            source="实时价格导入",
+            captured_at="2026-01-01T00:00:00+00:00",
+            upvotes=2,
+        )
+        db.upsert_synced_realtime_price_record(
+            remote_key="remote:item:2",
+            item_name="测试物品",
+            side="卖出",
+            amount=12,
+            currency="崇高石",
+            source="实时价格导入",
+            captured_at="2026-01-02T00:00:00+00:00",
+            upvotes=2,
+        )
+        app = PriceTrackerApp.__new__(PriceTrackerApp)
+        label = _Label()
+        app.db = db
+        app.realtime_import_labels = {"current_price": label}
+        app.realtime_item_var = _Var("测试物品")
+        app.realtime_currency_var = _Var("崇高石")
+        app.display_currency_var = _Var("神圣石")
+        app.config = SimpleNamespace(display_currency="神圣石")
+        app._realtime_min_upvotes = lambda: 1
+
+        app._update_realtime_current_price_label()
+
+        assert "当前记录：12 崇高石" in label.text
+        assert "趋势：+20%" in label.text
+        assert "实时价格导入-卖出" in label.text
+        assert "999" not in label.text
+    finally:
+        db.close()
+
+
+def test_realtime_current_price_prefers_base_currency_realtime_pair_history():
+    db = PriceDatabase(Path(":memory:"))
+    try:
+        db.add_price_record(
+            "神圣石",
+            150,
+            "崇高石",
+            "poe2db",
+            captured_at="2026-01-03T00:00:00+00:00",
+        )
+        db.upsert_synced_realtime_price_record(
+            remote_key="remote:currency:1",
+            item_name="神圣石",
+            side="卖出",
+            amount=180,
+            currency="崇高石",
+            source="实时价格导入",
+            captured_at="2026-01-01T00:00:00+00:00",
+            upvotes=2,
+        )
+        db.upsert_synced_realtime_price_record(
+            remote_key="remote:currency:2",
+            item_name="神圣石",
+            side="卖出",
+            amount=181,
+            currency="崇高石",
+            source="实时价格导入",
+            captured_at="2026-01-02T00:00:00+00:00",
+            upvotes=2,
+        )
+        app = PriceTrackerApp.__new__(PriceTrackerApp)
+        label = _Label()
+        app.db = db
+        app.realtime_import_labels = {"current_price": label}
+        app.realtime_item_var = _Var("神圣石")
+        app.realtime_currency_var = _Var("崇高石")
+        app.display_currency_var = _Var("神圣石")
+        app.config = SimpleNamespace(display_currency="神圣石")
+        app._realtime_min_upvotes = lambda: 1
+
+        app._update_realtime_current_price_label()
+
+        assert "当前兑换：181 崇高石" in label.text
+        assert "趋势：+1%" in label.text
+        assert "实时价格导入-卖出" in label.text
+        assert "150" not in label.text
+    finally:
+        db.close()
+
+
+def test_update_check_worker_posts_failure_event_on_exception(monkeypatch):
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    app.config = SimpleNamespace(update_manifest="")
+    app.events = queue.Queue()
+
+    def fail(_manifest, timeout=0):
+        raise RuntimeError("boom")
+
+    monkeypatch.setattr(app_module, "check_update", fail)
+
+    app._check_update_worker(False)
+    kind, info, silent = app.events.get_nowait()
+
+    assert kind == "update_check_done"
+    assert not info.available
+    assert "boom" in info.message
+    assert silent is False
+
+
+def test_update_check_restarts_stale_pending_check(monkeypatch):
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    app.updating = False
+    app.update_checking = True
+    app.update_check_started_at = time.monotonic() - 30
+    app.update_check_token = 5
+    app.latest_update_info = None
+    app.config = SimpleNamespace(update_manifest="")
+    app.progress_var = _Var()
+    app.root = SimpleNamespace(after=lambda *_args, **_kwargs: None)
+    app._set_manual_download_button_enabled = lambda *_args: None
+    app._set_version_update_status = lambda *_args, **_kwargs: None
+    app._set_progress_busy = lambda text: app.progress_var.set(text)
+    started = {}
+
+    class ImmediateThread:
+        def __init__(self, target, args=(), daemon=False):
+            self.target = target
+            self.args = args
+            self.daemon = daemon
+
+        def start(self):
+            started["args"] = self.args
+
+    monkeypatch.setattr(app_module.threading, "Thread", ImmediateThread)
+    app._check_update_worker = lambda *args: started.setdefault("worker_args", args)
+
+    app.check_for_updates(silent=False)
+
+    assert app.update_checking
+    assert app.update_check_token > 5
+    assert started["args"][0] is False
+    assert app.progress_var.get() == "正在检查更新..."

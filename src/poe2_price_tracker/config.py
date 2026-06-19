@@ -10,10 +10,18 @@ from typing import Any
 APP_DIR_NAME = "PoE2PriceTracker"
 GITHUB_RELEASE_BASE = "https://github.com/bigdogaaa/PoE2PriceTracker/releases"
 GITHUB_UPDATE_MANIFEST_URL = f"{GITHUB_RELEASE_BASE}/latest/download/latest.json"
-QINIU_UPDATE_MANIFEST_URL = "http://tgu7052fc.hb-bkt.clouddn.com/poe2-price-tracker/latest.json"
-UPDATE_MANIFEST_URL = f"{QINIU_UPDATE_MANIFEST_URL}\n{GITHUB_UPDATE_MANIFEST_URL}"
+GITEE_RELEASE_REPO = "https://gitee.com/BiGDoGaaa/poe2pricetracker_version_info"
+GITEE_UPDATE_MANIFEST_URL = f"{GITEE_RELEASE_REPO}/raw/master/latest.json"
+LEGACY_QINIU_UPDATE_MANIFEST_URL = "http://tgu7052fc.hb-bkt.clouddn.com/poe2-price-tracker/latest.json"
+UPDATE_MANIFEST_URL = GITHUB_UPDATE_MANIFEST_URL
 LEGACY_RELEASE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker-release/releases/download"
 LEGACY_SOURCE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download"
+GITEE_VERSION_INFO_REPO_MARKER = "gitee.com/bigdogaaa/poe2pricetracker_version_info"
+GITEE_VERSION_INFO_RAW_MARKER = "raw.giteeusercontent.com/bigdogaaa/poe2pricetracker_version_info"
+
+
+def default_ocr_cpu_threads() -> int:
+    return max(1, (os.cpu_count() or 4) // 4)
 
 
 def default_data_dir() -> Path:
@@ -45,8 +53,8 @@ class AppConfig:
     focus_search_limit: int = 5
     manual_add_favorite: bool = True
     preload_ocr_on_start: bool = False
-    ocr_cpu_threads: int = 0
-    ocr_execution_provider: str = "auto"
+    ocr_cpu_threads: int = field(default_factory=default_ocr_cpu_threads)
+    ocr_execution_provider: str = "directml"
     ocr_low_priority: bool = True
     ocr_performance_configured: bool = False
     screenshot_retention_count: int = 20
@@ -54,6 +62,7 @@ class AppConfig:
     realtime_min_upvotes: int = 0
     price_share_service_url: str = "http://117.50.51.78:8787"
     auto_check_updates: bool = True
+    update_sources_configured: bool = False
     minimize_action: str = "ask"
     close_action: str = "ask"
     visible_columns: list[str] = field(
@@ -94,6 +103,57 @@ def normalize_price_share_service_url(value: str, default: str) -> str:
     if "127.0.0.1" in url or "localhost" in url.lower():
         url = default
     return url
+
+
+def _split_update_manifest_sources(value: str) -> list[str]:
+    sources: list[str] = []
+    for line in str(value or "").replace(",", "\n").replace(";", "\n").splitlines():
+        item = line.strip()
+        if item:
+            sources.append(item)
+    return sources
+
+
+def _is_obsolete_update_manifest_source(value: str) -> bool:
+    item = str(value or "").strip()
+    lower_item = item.lower()
+    if not item:
+        return True
+    if item == GITEE_UPDATE_MANIFEST_URL:
+        return True
+    if LEGACY_QINIU_UPDATE_MANIFEST_URL in item:
+        return True
+    if LEGACY_SOURCE_REPO_DOWNLOAD_BASE in item:
+        return True
+    if LEGACY_RELEASE_REPO_DOWNLOAD_BASE in item:
+        return True
+    if GITEE_VERSION_INFO_REPO_MARKER in lower_item:
+        return True
+    if GITEE_VERSION_INFO_RAW_MARKER in lower_item:
+        return True
+    return False
+
+
+def normalize_extra_update_manifest(value: str) -> str:
+    sources: list[str] = []
+    for item in _split_update_manifest_sources(value):
+        if _is_obsolete_update_manifest_source(item):
+            continue
+        if item not in sources:
+            sources.append(item)
+    return "\n".join(sources)
+
+
+def effective_update_manifest(value: str) -> str:
+    sources = [GITEE_UPDATE_MANIFEST_URL]
+    for item in _split_update_manifest_sources(normalize_extra_update_manifest(value)):
+        if item not in sources:
+            sources.append(item)
+    return "\n".join(sources)
+
+
+def should_reset_update_manifest(value: str) -> bool:
+    return normalize_extra_update_manifest(value) != str(value or "").strip()
 
 
 def load_config() -> AppConfig:
@@ -139,9 +199,12 @@ def load_config() -> AppConfig:
     except (TypeError, ValueError):
         loaded.ocr_cpu_threads = 0
     if loaded.ocr_execution_provider not in {"cpu", "auto", "cuda", "directml"}:
-        loaded.ocr_execution_provider = "auto"
-    if not raw.get("ocr_performance_configured", False) and raw.get("ocr_execution_provider", "") in {"", "cpu"}:
-        loaded.ocr_execution_provider = "auto"
+        loaded.ocr_execution_provider = "directml"
+    if not raw.get("ocr_performance_configured", False):
+        if raw.get("ocr_execution_provider", "") in {"", "cpu", "auto"}:
+            loaded.ocr_execution_provider = "directml"
+        if int(loaded.ocr_cpu_threads or 0) <= 0:
+            loaded.ocr_cpu_threads = default_ocr_cpu_threads()
     if "图标" not in loaded.visible_columns:
         try:
             index = loaded.visible_columns.index("物品")
@@ -160,13 +223,9 @@ def load_config() -> AppConfig:
         getattr(loaded, "price_share_service_url", ""),
         config.price_share_service_url,
     )
-    if (
-        not loaded.update_manifest.strip()
-        or loaded.update_manifest.strip() == GITHUB_UPDATE_MANIFEST_URL
-        or LEGACY_SOURCE_REPO_DOWNLOAD_BASE in loaded.update_manifest
-        or LEGACY_RELEASE_REPO_DOWNLOAD_BASE in loaded.update_manifest
-    ):
-        loaded.update_manifest = config.update_manifest
+    loaded.update_manifest = normalize_extra_update_manifest(loaded.update_manifest)
+    if not raw.get("update_sources_configured", False) and not loaded.update_manifest:
+        loaded.update_manifest = GITHUB_UPDATE_MANIFEST_URL
     ensure_dirs(loaded)
     save_config(loaded)
     return loaded

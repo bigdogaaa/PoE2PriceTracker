@@ -4,6 +4,12 @@ from types import SimpleNamespace
 from poe2_price_tracker.ocr import RapidOcr
 
 
+def test_auto_cpu_threads_use_quarter_of_logical_cores(monkeypatch):
+    monkeypatch.setattr("os.cpu_count", lambda: 16)
+
+    assert RapidOcr(cpu_threads=0).cpu_threads == 4
+
+
 class FakeRapidOCR:
     created_params: list[dict] = []
 
