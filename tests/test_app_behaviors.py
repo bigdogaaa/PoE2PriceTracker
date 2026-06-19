@@ -5,11 +5,12 @@ import time
 from pathlib import Path
 from types import SimpleNamespace
 
-from poe2_price_tracker.app import PriceTrackerApp
+from poe2_price_tracker.app import PriceTrackerApp, _database_integrity_error, format_price_amount
 from poe2_price_tracker import app as app_module
 from poe2_price_tracker.db import PriceDatabase
 from poe2_price_tracker.market_exchange import ParsedMarketExchange, ParsedRealtimePrice
 from poe2_price_tracker.parser import ParsedItemPrice
+from poe2_price_tracker.updater import UpdateInfo
 
 
 class _Var:
@@ -108,6 +109,46 @@ def test_rating_fallback_text_keeps_icon_marker():
     assert PriceTrackerApp._rating_label_text("12", True, force_text_icon=True) == "👍 12"
 
 
+def test_price_amount_format_respects_decimal_places():
+    assert format_price_amount(1.2, 2) == "1.2"
+    assert format_price_amount(1.236, 2) == "1.24"
+    assert format_price_amount(12.9, 0) == "13"
+    assert format_price_amount(1.23456789, 4) == "1.2346"
+
+
+def test_update_notes_text_formats_manifest_notes():
+    info = UpdateInfo(
+        True,
+        "0.4.9",
+        "1.0.0",
+        "",
+        "",
+        "发现新版本。",
+        notes=("修复多屏截图", "", "性能优化"),
+    )
+
+    assert PriceTrackerApp._update_notes_text(info) == "- 修复多屏截图\n- 性能优化"
+    assert PriceTrackerApp._update_notes_text(info, limit=1) == "- 修复多屏截图"
+
+
+def test_update_notes_text_has_empty_fallback():
+    info = UpdateInfo(True, "0.4.9", "1.0.0", "", "", "发现新版本。")
+
+    assert PriceTrackerApp._update_notes_text(info) == "暂无更新说明。"
+
+
+def test_database_integrity_error_detects_corrupt_sqlite():
+    temp_dir = Path(f".tmp-corrupt-db-{uuid.uuid4().hex}")
+    db_path = temp_dir / "prices.sqlite3"
+    temp_dir.mkdir(parents=True, exist_ok=True)
+    db_path.write_text("not sqlite", encoding="utf-8")
+
+    try:
+        assert "数据库" in _database_integrity_error(db_path)
+    finally:
+        shutil.rmtree(temp_dir, ignore_errors=True)
+
+
 def test_realtime_rating_available_uses_record_id_not_display_source():
     app = PriceTrackerApp.__new__(PriceTrackerApp)
 
@@ -147,6 +188,92 @@ def test_quick_price_trend_converts_history_to_latest_currency():
     ]
 
     assert app._quick_price_trend(history, "崇高石") == "+100%"
+
+
+def test_market_row_for_item_uses_market_trend_fallback_for_single_poe2db_record():
+    db = PriceDatabase(Path(":memory:"))
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    app.db = db
+    app.config = SimpleNamespace(realtime_min_upvotes=0, display_currency="神圣石")
+    app.display_currency_var = _Var("神圣石")
+    try:
+        db.add_price_record("先祖密藏日志", 12, "神圣石", "poe2db", raw_text="trend=-8%")
+
+        row = app._market_row_for_item("先祖密藏日志")
+
+        assert row is not None
+        assert row.trend_percent == "-8%"
+        assert app._stats_trend_percent("先祖密藏日志", "神圣石") == "-8%"
+    finally:
+        db.close()
+
+
+def test_market_row_for_item_resolves_one_character_ocr_typo():
+    db = PriceDatabase(Path(":memory:"))
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    app.db = db
+    app.config = SimpleNamespace(realtime_min_upvotes=0, display_currency="神圣石")
+    app.display_currency_var = _Var("神圣石")
+    try:
+        db.add_price_record("先祖秘藏日志", 12, "神圣石", "poe2db", raw_text="trend=-8%")
+
+        row = app._market_row_for_item("先祖密藏日志")
+
+        assert row is not None
+        assert row.item_name == "先祖秘藏日志"
+        assert row.trend_percent == "-8%"
+    finally:
+        db.close()
+
+
+def test_quick_price_uses_market_row_trend_matching_focus_search():
+    db = PriceDatabase(Path(":memory:"))
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    app.db = db
+    app.config = SimpleNamespace(realtime_min_upvotes=0, display_currency="神圣石")
+    app.display_currency_var = _Var("神圣石")
+    captured = {}
+    app._set_progress_idle = lambda *_args, **_kwargs: None
+
+    def capture_overlay(title, price, subtitle, trend, *args):
+        captured.update({"title": title, "price": price, "subtitle": subtitle, "trend": trend, "args": args})
+
+    app._show_quick_price_overlay = capture_overlay
+    try:
+        db.add_price_record("先祖密藏日志", 12, "神圣石", "poe2db", raw_text="trend=-8%")
+        focus_row = db.get_market_rows(query="先祖密藏日志", limit=1)[0]
+
+        app._show_quick_price_for_text("物品类别: 日志\n稀有度: 普通\n先祖密藏日志\n--------")
+
+        assert focus_row.trend_percent == "-8%"
+        assert captured["title"] == "先祖密藏日志"
+        assert captured["trend"] == focus_row.trend_percent
+    finally:
+        db.close()
+
+
+def test_quick_price_converts_market_row_to_display_currency():
+    db = PriceDatabase(Path(":memory:"))
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    app.db = db
+    app.config = SimpleNamespace(realtime_min_upvotes=0, display_currency="崇高石", price_decimal_places=3)
+    app.display_currency_var = _Var("崇高石")
+    captured = {}
+    app._set_progress_idle = lambda *_args, **_kwargs: None
+
+    def capture_overlay(title, price, subtitle, trend, *args):
+        captured.update({"title": title, "price": price, "subtitle": subtitle, "trend": trend, "args": args})
+
+    app._show_quick_price_overlay = capture_overlay
+    try:
+        db.add_price_record("测试物品", 1, "神圣石", "poe2db")
+        db.add_price_record("神圣石", 100, "崇高石", "实时价格导入")
+
+        app._show_quick_price_for_text("物品类别: 测试\n稀有度: 普通\n测试物品\n--------")
+
+        assert captured["price"] == "100 崇高石"
+    finally:
+        db.close()
 
 
 def test_version_status_text_appends_status_after_version():
@@ -411,3 +538,34 @@ def test_update_check_restarts_stale_pending_check(monkeypatch):
     assert app.update_check_token > 5
     assert started["args"][0] is False
     assert app.progress_var.get() == "正在检查更新..."
+
+
+def test_update_check_result_schedules_update_dialog():
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    app.update_checking = True
+    app.update_check_started_at = time.monotonic()
+    app.latest_update_info = None
+    app.progress_var = _Var()
+    app.version_status_var = _Var()
+    app.update_dialog_window = None
+    app.update_dialog_version = ""
+    app.root = SimpleNamespace(after_idle=lambda callback: callback())
+    app._set_manual_download_button_enabled = lambda *_args: None
+    app._set_version_update_status = lambda text, available=False: app.version_status_var.set(text)
+    app._set_progress_then_idle = lambda text: app.progress_var.set(text)
+    shown = {}
+    app._show_update_available_dialog = lambda info: shown.setdefault("version", info.latest_version)
+    info = UpdateInfo(True, "0.4.9", "1.0.0", "https://example.com/app.exe", "", "found")
+
+    app._handle_update_check_result(info, silent=False)
+
+    assert shown["version"] == "1.0.0"
+    assert app.latest_update_info is info
+    assert app.version_status_var.get()
+
+
+def test_update_download_button_uses_ttk_supported_options():
+    options = {"text": "手动下载", "command": lambda: None, "width": 10}
+    unsupported = {"bg", "fg", "activebackground", "activeforeground", "relief", "padx"}
+
+    assert unsupported.isdisjoint(options)

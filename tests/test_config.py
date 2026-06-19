@@ -27,6 +27,7 @@ def test_default_config_keeps_github_as_deletable_fallback_and_directml_ocr():
     assert effective_update_manifest(config.update_manifest) == f"{GITEE_UPDATE_MANIFEST_URL}\n{GITHUB_UPDATE_MANIFEST_URL}"
     assert config.ocr_execution_provider == "directml"
     assert config.ocr_cpu_threads == default_ocr_cpu_threads()
+    assert config.price_decimal_places == 3
 
 
 def test_legacy_update_manifests_are_reset():

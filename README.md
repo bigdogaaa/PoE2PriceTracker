@@ -160,9 +160,9 @@ https://poe2db.tw/cn/Economy
 
 https://github.com/bigdogaaa/PoE2PriceTracker/releases/latest
 
-当前版本：`0.4.9`
+当前版本：`0.4.10`
 
-如果你只是使用软件，下载 release 中的 `PoE2PriceTracker-0.4.9.exe` 即可。
+如果你只是使用软件，下载 release 中的 `PoE2PriceTracker-0.4.10.exe` 即可。
 
 ## 更新源
 
@@ -178,10 +178,10 @@ https://gitee.com/BiGDoGaaa/poe2pricetracker_version_info/raw/master/latest.json
 
 ```json
 {
-  "version": "0.4.9",
+  "version": "0.4.10",
   "channel": "stable",
-  "url": "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.4.9/PoE2PriceTracker-0.4.9.exe",
-  "download_url": "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.4.9/PoE2PriceTracker-0.4.9.exe",
+  "url": "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.4.10/PoE2PriceTracker-0.4.10.exe",
+  "download_url": "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.4.10/PoE2PriceTracker-0.4.10.exe",
   "manual_urls": ["https://pan.quark.cn/s/xxxx"],
   "sha256": "...",
   "size": 105518264,
@@ -196,7 +196,7 @@ https://gitee.com/BiGDoGaaa/poe2pricetracker_version_info/raw/master/latest.json
 ```powershell
 $env:GITHUB_TOKEN="你的 GitHub token"
 $env:GITEE_TOKEN="你的 Gitee token"
-python scripts\publish_release_channels.py --version 0.4.9 --asset dist\PoE2PriceTracker-0.4.9.exe --quark-url "https://pan.quark.cn/s/xxxx" --notes "更新说明"
+python scripts\publish_release_channels.py --version 0.4.10 --asset dist\PoE2PriceTracker-0.4.10.exe --quark-url "https://pan.quark.cn/s/xxxx" --notes "更新说明"
 ```
 
 客户端默认读取 Gitee `latest.json`；如果检测到新版本，自动下载走 GitHub，手动下载按钮打开夸克链接。
@@ -270,6 +270,15 @@ python scripts\publish_release_channels.py --version 0.4.9 --asset dist\PoE2Pric
 若用户希望删除本软件产生的本地数据，可通过软件设置、清理缓存、删除配置文件或卸载软件等方式处理。
 
 ## 更新说明
+
+### 2026-06-20 v0.4.10
+
+- 修复 F4 快捷查价价格单位不跟随全局显示单位的问题。
+- 优化更新弹窗，展示更新内容并统一为手动下载入口。
+- 优化多屏截图显示和截图进入蒙版速度。
+- 新增价格小数位数配置和打开缓存位置按钮。
+- 启动时增加配置与数据库校验，减少损坏文件导致的启动失败。
+- 修复趋势显示一致性等已知问题，并优化本地查询性能。
 
 ### 2026-06-19 v0.4.9
 

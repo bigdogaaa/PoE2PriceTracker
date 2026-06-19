@@ -47,6 +47,7 @@ class AppConfig:
     screenshot_height: int = 520
     ocr_engine: str = "rapidocr"
     font_size: int = 15
+    price_decimal_places: int = 3
     display_currency: str = "神圣石"
     page_size: int = 25
     focus_search_rounded: bool = True
@@ -186,6 +187,10 @@ def load_config() -> AppConfig:
         loaded.focus_search_limit = max(1, min(10, int(loaded.focus_search_limit or 5)))
     except (TypeError, ValueError):
         loaded.focus_search_limit = 5
+    try:
+        loaded.price_decimal_places = max(0, min(8, int(loaded.price_decimal_places)))
+    except (TypeError, ValueError):
+        loaded.price_decimal_places = 3
     try:
         loaded.screenshot_retention_count = max(1, min(500, int(loaded.screenshot_retention_count or 20)))
     except (TypeError, ValueError):

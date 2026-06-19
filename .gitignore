@@ -47,6 +47,15 @@ Tesseract安装后/
 docs/images/image*.png
 static/dislike.png
 
+# Local secrets
+.env
+.env.*
+!.env.example
+server/.env
+server/.env.*
+!server/.env.example
+server/ssl_child_test.txt
+
 # IDE and OS files
 .idea/
 .vscode/

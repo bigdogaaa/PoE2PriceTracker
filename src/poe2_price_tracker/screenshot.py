@@ -23,6 +23,20 @@ class POINT(ctypes.Structure):
     _fields_ = [("x", ctypes.c_long), ("y", ctypes.c_long)]
 
 
+def get_virtual_screen_bounds() -> tuple[int, int, int, int]:
+    try:
+        user32 = ctypes.windll.user32
+        left = int(user32.GetSystemMetrics(76))
+        top = int(user32.GetSystemMetrics(77))
+        width = int(user32.GetSystemMetrics(78))
+        height = int(user32.GetSystemMetrics(79))
+        if width > 0 and height > 0:
+            return left, top, left + width, top + height
+    except Exception:
+        pass
+    return 0, 0, 0, 0
+
+
 def get_cursor_position() -> Point:
     point = POINT()
     ctypes.windll.user32.GetCursorPos(ctypes.byref(point))
@@ -119,8 +133,15 @@ def capture_around_cursor(
 ) -> Path:
     output_dir.mkdir(parents=True, exist_ok=True)
     cursor = get_cursor_position()
-    left = max(0, cursor.x - width // 2)
-    top = max(0, cursor.y - height // 2)
+    screen_left, screen_top, screen_right, screen_bottom = get_virtual_screen_bounds()
+    if screen_right > screen_left and screen_bottom > screen_top:
+        max_left = max(screen_left, screen_right - width)
+        max_top = max(screen_top, screen_bottom - height)
+        left = max(screen_left, min(cursor.x - width // 2, max_left))
+        top = max(screen_top, min(cursor.y - height // 2, max_top))
+    else:
+        left = max(0, cursor.x - width // 2)
+        top = max(0, cursor.y - height // 2)
     bbox = (left, top, left + width, top + height)
     image = ImageGrab.grab(bbox=bbox, all_screens=True)
     enhanced = enhance_for_ocr(image)
