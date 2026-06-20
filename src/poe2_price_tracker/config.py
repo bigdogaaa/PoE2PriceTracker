@@ -1,7 +1,12 @@
+# Copyright (c) 2026 大狗狗
+# This file is part of this project and is licensed under the GNU GPL-3.0-only.
+# See the LICENSE file for details.
+
 from __future__ import annotations
 
 import json
 import os
+import sys
 from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
@@ -13,13 +18,20 @@ APP_DIR_NAME = "PoE2PriceTracker"
 GITHUB_RELEASE_BASE = "https://github.com/bigdogaaa/PoE2PriceTracker/releases"
 GITHUB_UPDATE_MANIFEST_URL = f"{GITHUB_RELEASE_BASE}/latest/download/latest.json"
 GITEE_RELEASE_REPO = "https://gitee.com/BiGDoGaaa/poe2pricetracker_version_info"
-GITEE_UPDATE_MANIFEST_URL = f"{GITEE_RELEASE_REPO}/raw/master/latest.json"
+GITEE_STABLE_UPDATE_MANIFEST_URL = f"{GITEE_RELEASE_REPO}/raw/master/latest.json"
+GITEE_TEST_UPDATE_MANIFEST_URL = f"{GITEE_RELEASE_REPO}/raw/master/test/latest.json"
+GITEE_UPDATE_MANIFEST_URL = (
+    GITEE_TEST_UPDATE_MANIFEST_URL
+    if "test" in Path(sys.executable).stem.lower() or os.environ.get("POE2_UPDATE_CHANNEL", "").lower() == "test"
+    else GITEE_STABLE_UPDATE_MANIFEST_URL
+)
 LEGACY_QINIU_UPDATE_MANIFEST_URL = "http://tgu7052fc.hb-bkt.clouddn.com/poe2-price-tracker/latest.json"
 UPDATE_MANIFEST_URL = GITHUB_UPDATE_MANIFEST_URL
 LEGACY_RELEASE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker-release/releases/download"
 LEGACY_SOURCE_REPO_DOWNLOAD_BASE = "https://gitee.com/BiGDoGaaa/poe2-price-tracker/releases/download"
 GITEE_VERSION_INFO_REPO_MARKER = "gitee.com/bigdogaaa/poe2pricetracker_version_info"
 GITEE_VERSION_INFO_RAW_MARKER = "raw.giteeusercontent.com/bigdogaaa/poe2pricetracker_version_info"
+FONT_SIZE_MIGRATION_VERSION = "0.4.22"
 
 
 def default_ocr_cpu_threads() -> int:
@@ -48,8 +60,10 @@ class AppConfig:
     screenshot_width: int = 760
     screenshot_height: int = 520
     ocr_engine: str = "rapidocr"
-    font_size: int = 15
-    ui_theme: str = "default"
+    font_size: int = 20
+    font_size_configured: bool = False
+    font_size_migration_version: str = FONT_SIZE_MIGRATION_VERSION
+    ui_theme: str = "poe2"
     price_decimal_places: int = 3
     display_currency: str = "神圣石"
     page_size: int = 25
@@ -125,6 +139,8 @@ def _is_obsolete_update_manifest_source(value: str) -> bool:
         return True
     if item == GITEE_UPDATE_MANIFEST_URL:
         return True
+    if item in {GITEE_STABLE_UPDATE_MANIFEST_URL, GITEE_TEST_UPDATE_MANIFEST_URL}:
+        return True
     if LEGACY_QINIU_UPDATE_MANIFEST_URL in item:
         return True
     if LEGACY_SOURCE_REPO_DOWNLOAD_BASE in item:
@@ -160,6 +176,12 @@ def should_reset_update_manifest(value: str) -> bool:
     return normalize_extra_update_manifest(value) != str(value or "").strip()
 
 
+def _apply_font_size_migration(config: AppConfig, raw: dict[str, Any]) -> None:
+    if str(raw.get("font_size_migration_version", "")) != FONT_SIZE_MIGRATION_VERSION:
+        config.font_size = 20
+        config.font_size_migration_version = FONT_SIZE_MIGRATION_VERSION
+
+
 def load_config() -> AppConfig:
     config = AppConfig()
     path = config.config_path
@@ -182,9 +204,14 @@ def load_config() -> AppConfig:
         loaded.hotkeys.focus_search = "Ctrl+Space"
     if loaded.hotkeys.focus_search == "F3":
         loaded.hotkeys.focus_search = "Ctrl+Space"
-    if loaded.font_size < 15:
-        loaded.font_size = 15
-    loaded.ui_theme = normalize_theme_key(getattr(loaded, "ui_theme", "default"))
+    try:
+        loaded.font_size = max(13, min(24, int(loaded.font_size or 20)))
+    except (TypeError, ValueError):
+        loaded.font_size = 20
+    if not bool(getattr(loaded, "font_size_configured", False)) and loaded.font_size in {15, 18}:
+        loaded.font_size = 20
+    _apply_font_size_migration(loaded, raw)
+    loaded.ui_theme = normalize_theme_key(getattr(loaded, "ui_theme", "poe2"))
     if loaded.page_size == 50:
         loaded.page_size = 25
     try:

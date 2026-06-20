@@ -1,3 +1,7 @@
+# Copyright (c) 2026 大狗狗
+# This file is part of this project and is licensed under the GNU GPL-3.0-only.
+# See the LICENSE file for details.
+
 from __future__ import annotations
 
 import re
@@ -14,6 +18,18 @@ if TYPE_CHECKING:
 
 
 NUMBER_RE = re.compile(r"\d+(?:,\d{3})*(?:[.,]\d+)?|\d+(?:[.,]\d+)?")
+UI_TEXT_CANDIDATE_BLOCKLIST = {
+    "拥有物品",
+    "擁有物品",
+    "持有物品",
+    "物品",
+    "价格",
+    "價格",
+    "搜索",
+    "搜尋",
+    "查价",
+    "查價",
+}
 
 
 def _primary_trade_currency(name: str) -> str:
@@ -109,6 +125,8 @@ def _clean_candidate_text(text: str) -> str:
 def _looks_like_item_candidate(text: str) -> bool:
     cleaned = _clean_candidate_text(text)
     if len(cleaned) < 2:
+        return False
+    if normalize_name(cleaned) in {normalize_name(value) for value in UI_TEXT_CANDIDATE_BLOCKLIST}:
         return False
     if NUMBER_RE.fullmatch(cleaned):
         return False

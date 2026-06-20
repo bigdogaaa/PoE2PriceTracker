@@ -1,3 +1,7 @@
+# Copyright (c) 2026 大狗狗
+# This file is part of this project and is licensed under the GNU GPL-3.0-only.
+# See the LICENSE file for details.
+
 from __future__ import annotations
 
 import re
@@ -83,6 +87,72 @@ def _center(box: OcrBox) -> tuple[float, float]:
     return (left + right) / 2, (top + bottom) / 2
 
 
+def _box_height(box: OcrBox) -> float:
+    _left, top, _right, bottom = _box_rect(box)
+    return max(1.0, bottom - top)
+
+
+def _horizontal_overlap_ratio(left_box: OcrBox, right_box: OcrBox) -> float:
+    left_a, _top_a, right_a, _bottom_a = _box_rect(left_box)
+    left_b, _top_b, right_b, _bottom_b = _box_rect(right_box)
+    overlap = max(0.0, min(right_a, right_b) - max(left_a, left_b))
+    width = max(1.0, min(right_a - left_a, right_b - left_b))
+    return overlap / width
+
+
+def _contains_cjk(text: str) -> bool:
+    return any("\u4e00" <= ch <= "\u9fff" for ch in text)
+
+
+def _join_item_name_parts(parts: list[str]) -> str:
+    output = ""
+    for part in [item.strip() for item in parts if item.strip()]:
+        if not output:
+            output = part
+            continue
+        if _contains_cjk(output) or _contains_cjk(part):
+            output += part
+        else:
+            output += " " + part
+    return output.strip()
+
+
+def _merge_item_name_lines(primary: OcrBox, candidates: list[OcrBox]) -> str:
+    parts = [primary.text.strip()]
+    current = primary
+    for candidate in sorted(candidates, key=lambda item: (_box_rect(item)[1], _box_rect(item)[0])):
+        if candidate is primary:
+            continue
+        left, top, right, bottom = _box_rect(candidate)
+        current_left, _current_top, current_right, current_bottom = _box_rect(current)
+        if top < current_bottom - _box_height(current) * 0.35:
+            continue
+        vertical_gap = top - current_bottom
+        max_gap = max(12.0, min(32.0, _box_height(current) * 1.1))
+        if vertical_gap > max_gap:
+            if top > current_bottom + max_gap:
+                break
+            continue
+        if _horizontal_overlap_ratio(current, candidate) < 0.35:
+            center_x, _center_y = _center(candidate)
+            if center_x < current_left - 8 or center_x > current_right + 8:
+                continue
+        parts.append(candidate.text.strip())
+        current = OcrBox(
+            text=candidate.text,
+            score=candidate.score,
+            points=(
+                (min(current_left, left), min(_box_rect(current)[1], top)),
+                (max(current_right, right), min(_box_rect(current)[1], top)),
+                (max(current_right, right), max(current_bottom, bottom)),
+                (min(current_left, left), max(current_bottom, bottom)),
+            ),
+        )
+        if len(parts) >= 3:
+            break
+    return _join_item_name_parts(parts)
+
+
 def _is_ratio(text: str) -> bool:
     return bool(_RATIO_RE.search(text.replace(" ", "")))
 
@@ -125,8 +195,10 @@ def _pick_item_near_label(boxes: list[OcrBox], label: str, width: int, side: str
     if anchor is None:
         return ""
     anchor_x, anchor_y = _center(anchor)
-    candidates = []
+    candidates: list[tuple[float, float, OcrBox]] = []
     for box in boxes:
+        if box is anchor:
+            continue
         text = box.text.strip()
         if not _looks_like_item_name(text):
             continue
@@ -138,9 +210,12 @@ def _pick_item_near_label(boxes: list[OcrBox], label: str, width: int, side: str
         if y < anchor_y:
             continue
         distance = abs(x - anchor_x) * 0.35 + abs(y - anchor_y)
-        candidates.append((distance, -box.score, text))
+        candidates.append((distance, -box.score, box))
     candidates.sort()
-    return candidates[0][2] if candidates else ""
+    if not candidates:
+        return ""
+    primary = candidates[0][2]
+    return _merge_item_name_lines(primary, [item[2] for item in candidates])
 
 
 def _pick_item_by_region(boxes: list[OcrBox], side: str, width: int, height: int) -> str:
@@ -150,7 +225,7 @@ def _pick_item_by_region(boxes: list[OcrBox], side: str, width: int, height: int
     else:
         candidates = [box for box in boxes if _center(box)[0] > width * 0.52 and _looks_like_item_name(box.text)]
         candidates.sort(key=lambda box: (_center(box)[1] > height * 0.72, -_center(box)[0], -box.score))
-    return candidates[0].text.strip() if candidates else ""
+    return _merge_item_name_lines(candidates[0], candidates) if candidates else ""
 
 
 def _pick_item_name(boxes: list[OcrBox], side: str, width: int, height: int) -> str:

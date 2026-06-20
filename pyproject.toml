@@ -1,7 +1,8 @@
 [project]
 name = "poe2-price-tracker"
-version = "0.4.10"
+version = "0.4.22"
 description = "Local screenshot-first price tracker for Path of Exile 2."
+license = "GPL-3.0-only"
 requires-python = ">=3.11"
 dependencies = [
     "Pillow>=10.0",
@@ -16,6 +17,9 @@ dependencies = [
 [project.optional-dependencies]
 build = [
     "pyinstaller>=6.0",
+]
+test = [
+    "pytest>=8.0",
 ]
 
 [project.scripts]
@@ -34,3 +38,13 @@ poe2_price_tracker = ["assets/app_icon.ico", "assets/icons/currency/*"]
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+addopts = [
+    "--strict-markers",
+    "-p",
+    "no:cacheprovider",
+]
+markers = [
+    "gui: tests that intentionally create real Tk windows or interact with the desktop",
+    "integration: tests that touch external services, local executables, or release channels",
+    "slow: tests that are useful before releases but too broad for the normal edit loop",
+]

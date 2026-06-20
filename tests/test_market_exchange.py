@@ -1,11 +1,15 @@
 from pathlib import Path
 import sqlite3
-import uuid
 
 from PIL import Image
 
 from poe2_price_tracker.db import PriceDatabase, convert_amount
-from poe2_price_tracker.market_exchange import ParsedMarketExchange, derive_realtime_price, parse_market_exchange
+from poe2_price_tracker.market_exchange import (
+    ParsedMarketExchange,
+    _pick_item_near_label,
+    derive_realtime_price,
+    parse_market_exchange,
+)
 from poe2_price_tracker.ocr import OcrBox, OcrResult
 
 
@@ -17,14 +21,34 @@ def box(text: str, left: int, top: int, right: int, bottom: int, score: float = 
     )
 
 
-def _workspace_image_path() -> Path:
-    path = Path(".tmp-market-exchange-tests")
-    path.mkdir(exist_ok=True)
-    return path / f"{uuid.uuid4().hex}.png"
+def _workspace_image_path(tmp_path: Path) -> Path:
+    return tmp_path / "market.png"
 
 
-def test_parse_market_exchange_uses_structure_and_currency_text():
-    image_path = _workspace_image_path()
+def test_pick_item_near_label_combines_multiline_english_item_name():
+    boxes = [
+        box("Need", 110, 10, 200, 36),
+        box("Refined Necrotic", 70, 90, 230, 112),
+        box("Catalyst", 70, 122, 150, 146),
+        box("Divine Orb", 720, 94, 820, 118),
+    ]
+
+    assert _pick_item_near_label(boxes, "Need", 1000, "left") == "Refined Necrotic Catalyst"
+
+
+def test_pick_item_near_label_combines_multiline_chinese_item_name():
+    boxes = [
+        box("Need", 110, 10, 200, 36),
+        box("\u672a\u5207\u5272\u7684\u7cbe\u9b42\u5b9d\u77f3\uff08\u7b49", 70, 90, 280, 112),
+        box("\u7ea719)", 70, 122, 132, 146),
+        box("Divine Orb", 720, 94, 820, 118),
+    ]
+
+    assert _pick_item_near_label(boxes, "Need", 1000, "left") == "\u672a\u5207\u5272\u7684\u7cbe\u9b42\u5b9d\u77f3\uff08\u7b49\u7ea719)"
+
+
+def test_parse_market_exchange_uses_structure_and_currency_text(tmp_path):
+    image_path = _workspace_image_path(tmp_path)
     Image.new("RGB", (900, 220), "#222").save(image_path)
     result = OcrResult(
         text="需求物品\n剥离石\n拥有物品\n神圣石\n1.05:1\n1:1",
@@ -57,8 +81,8 @@ def test_parse_market_exchange_uses_structure_and_currency_text():
     assert realtime.currency == "神圣石"
 
 
-def test_parse_market_exchange_warns_when_no_currency_text_matches():
-    image_path = _workspace_image_path()
+def test_parse_market_exchange_warns_when_no_currency_text_matches(tmp_path):
+    image_path = _workspace_image_path(tmp_path)
     Image.new("RGB", (900, 220), "#222").save(image_path)
     result = OcrResult(
         text="需求物品\n未知甲\n拥有物品\n未知乙\n1:2\n1:2",
@@ -81,8 +105,8 @@ def test_parse_market_exchange_warns_when_no_currency_text_matches():
     assert "至少一边需要是通货" in parsed.message
 
 
-def test_parse_market_exchange_derives_sell_price_when_left_is_trade_currency():
-    image_path = _workspace_image_path()
+def test_parse_market_exchange_derives_sell_price_when_left_is_trade_currency(tmp_path):
+    image_path = _workspace_image_path(tmp_path)
     Image.new("RGB", (900, 220), "#222").save(image_path)
     result = OcrResult(
         text="需求物品\n崇高石\n拥有物品\n褪色危机碎片\n489:1\n489:1",
@@ -106,8 +130,8 @@ def test_parse_market_exchange_derives_sell_price_when_left_is_trade_currency():
     assert realtime.currency == "崇高石"
 
 
-def test_parse_market_exchange_derives_price_when_both_sides_are_primary_currencies():
-    image_path = _workspace_image_path()
+def test_parse_market_exchange_derives_price_when_both_sides_are_primary_currencies(tmp_path):
+    image_path = _workspace_image_path(tmp_path)
     Image.new("RGB", (900, 220), "#222").save(image_path)
     result = OcrResult(
         text="需求物品\n神圣石\n拥有物品\n崇高石\n1:150\n1:150",

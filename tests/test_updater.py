@@ -1,21 +1,20 @@
 import hashlib
 import json
 import shutil
-import uuid
 import zipfile
 from pathlib import Path
 
 from poe2_price_tracker import updater
 
 
-def _tmp_dir() -> Path:
-    path = Path(f".tmp-updater-{uuid.uuid4().hex}")
+def _tmp_dir(tmp_path: Path) -> Path:
+    path = tmp_path / "updater"
     path.mkdir()
     return path
 
 
-def test_check_update_accepts_channel_manifest_fields(monkeypatch):
-    tmp_path = _tmp_dir()
+def test_check_update_accepts_channel_manifest_fields(monkeypatch, tmp_path):
+    tmp_path = _tmp_dir(tmp_path)
     monkeypatch.setattr(updater, "__version__", "1.0.0")
     try:
         package = tmp_path / "PoE2PriceTracker-9.9.9.exe"
@@ -45,8 +44,8 @@ def test_check_update_accepts_channel_manifest_fields(monkeypatch):
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
-def test_check_update_falls_back_to_second_manifest(monkeypatch):
-    tmp_path = _tmp_dir()
+def test_check_update_falls_back_to_second_manifest(monkeypatch, tmp_path):
+    tmp_path = _tmp_dir(tmp_path)
     monkeypatch.setattr(updater, "__version__", "1.0.0")
     try:
         good = tmp_path / "latest.json"
@@ -79,8 +78,8 @@ def test_check_update_stops_after_first_valid_manifest(monkeypatch):
     assert calls == ["first"]
 
 
-def test_check_update_accepts_utf8_sig_manifest(monkeypatch):
-    tmp_path = _tmp_dir()
+def test_check_update_accepts_utf8_sig_manifest(monkeypatch, tmp_path):
+    tmp_path = _tmp_dir(tmp_path)
     monkeypatch.setattr(updater, "__version__", "1.0.0")
     try:
         manifest = tmp_path / "latest.json"
@@ -97,8 +96,8 @@ def test_check_update_accepts_utf8_sig_manifest(monkeypatch):
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
-def test_check_update_reads_manual_download_urls(monkeypatch):
-    tmp_path = _tmp_dir()
+def test_check_update_reads_manual_download_urls(monkeypatch, tmp_path):
+    tmp_path = _tmp_dir(tmp_path)
     monkeypatch.setattr(updater, "__version__", "1.0.0")
     try:
         manifest = tmp_path / "latest.json"
@@ -122,8 +121,8 @@ def test_check_update_reads_manual_download_urls(monkeypatch):
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
-def test_download_update_checks_size_and_sha256():
-    tmp_path = _tmp_dir()
+def test_download_update_checks_size_and_sha256(tmp_path):
+    tmp_path = _tmp_dir(tmp_path)
     try:
         package = tmp_path / "PoE2PriceTracker-2.0.0.exe"
         package.write_bytes(b"binary")
@@ -149,8 +148,8 @@ def test_download_update_checks_size_and_sha256():
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
-def test_download_update_falls_back_to_download_mirror():
-    tmp_path = _tmp_dir()
+def test_download_update_falls_back_to_download_mirror(tmp_path):
+    tmp_path = _tmp_dir(tmp_path)
     try:
         package = tmp_path / "PoE2PriceTracker-2.0.0.exe"
         package.write_bytes(b"binary")
@@ -190,8 +189,8 @@ def test_download_update_falls_back_to_download_mirror():
         shutil.rmtree(tmp_path, ignore_errors=True)
 
 
-def test_download_update_stages_executable_next_to_current_app_dir():
-    tmp_path = _tmp_dir()
+def test_download_update_stages_executable_next_to_current_app_dir(tmp_path):
+    tmp_path = _tmp_dir(tmp_path)
     try:
         package = tmp_path / "PoE2PriceTracker-2.0.0.zip"
         with zipfile.ZipFile(package, "w") as archive:

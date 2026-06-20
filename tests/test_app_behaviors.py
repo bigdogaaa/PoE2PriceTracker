@@ -1,5 +1,4 @@
 import shutil
-import uuid
 import queue
 import time
 from pathlib import Path
@@ -44,10 +43,13 @@ class _RealtimeDb:
 class _Label:
     def __init__(self):
         self.text = ""
+        self.state = ""
 
     def configure(self, **kwargs):
         if "text" in kwargs:
             self.text = kwargs["text"]
+        if "state" in kwargs:
+            self.state = kwargs["state"]
 
 
 def test_ocr_row_confidence_prefers_structured_score():
@@ -64,10 +66,8 @@ def test_ocr_row_confidence_prefers_structured_score():
     assert app._ocr_row_confidence(row) == 0.72
 
 
-def test_economy_sync_cooldown_is_persisted():
-    data_dir = Path(f".tmp-sync-state-{uuid.uuid4().hex}")
-    if data_dir.exists():
-        shutil.rmtree(data_dir, ignore_errors=True)
+def test_economy_sync_cooldown_is_persisted(tmp_path):
+    data_dir = tmp_path / "sync-state"
     app = PriceTrackerApp.__new__(PriceTrackerApp)
     app.config = SimpleNamespace(data_path=data_dir)
 
@@ -127,18 +127,35 @@ def test_update_notes_text_formats_manifest_notes():
         notes=("修复多屏截图", "", "性能优化"),
     )
 
-    assert PriceTrackerApp._update_notes_text(info) == "- 修复多屏截图\n- 性能优化"
-    assert PriceTrackerApp._update_notes_text(info, limit=1) == "- 修复多屏截图"
+    assert PriceTrackerApp._update_notes_text(info) == (
+        "- 修复多屏截图\n"
+        "- 性能优化\n"
+        f"- {app_module.FREE_SOFTWARE_NOTICE}"
+    )
+    assert PriceTrackerApp._update_notes_text(info, limit=1) == (
+        "- 修复多屏截图\n"
+        f"- {app_module.FREE_SOFTWARE_NOTICE}"
+    )
 
 
 def test_update_notes_text_has_empty_fallback():
     info = UpdateInfo(True, "0.4.9", "1.0.0", "", "", "发现新版本。")
 
-    assert PriceTrackerApp._update_notes_text(info) == "暂无更新说明。"
+    assert PriceTrackerApp._update_notes_text(info) == (
+        "暂无更新说明。\n"
+        f"- {app_module.FREE_SOFTWARE_NOTICE}"
+    )
 
 
-def test_database_integrity_error_detects_corrupt_sqlite():
-    temp_dir = Path(f".tmp-corrupt-db-{uuid.uuid4().hex}")
+def test_update_notes_text_does_not_duplicate_free_notice():
+    notice = app_module.FREE_SOFTWARE_NOTICE
+    info = UpdateInfo(True, "0.4.9", "1.0.0", "", "", "发现新版本。", notes=("修复问题", notice))
+
+    assert PriceTrackerApp._update_notes_text(info).count(notice) == 1
+
+
+def test_database_integrity_error_detects_corrupt_sqlite(tmp_path):
+    temp_dir = tmp_path / "corrupt-db"
     db_path = temp_dir / "prices.sqlite3"
     temp_dir.mkdir(parents=True, exist_ok=True)
     db_path.write_text("not sqlite", encoding="utf-8")
@@ -169,10 +186,27 @@ def test_quick_price_overlay_position_avoids_empty_pointer_fallback():
     assert y >= 24
 
 
+def test_quick_price_overlay_position_flips_left_near_right_edge():
+    x, y = PriceTrackerApp._quick_price_overlay_position((1880, 320), (0, 0, 1920, 1080), 460, 260)
+
+    assert x == 1396
+    assert y == 344
+
+
+def test_quick_price_overlay_position_flips_up_near_bottom_edge():
+    x, y = PriceTrackerApp._quick_price_overlay_position((820, 1040), (0, 0, 1920, 1080), 460, 260)
+
+    assert x == 844
+    assert y == 756
+
+
 def test_screenshot_lookup_overlay_height_is_compact_for_few_rows():
-    one_row = PriceTrackerApp._screenshot_lookup_overlay_height(62, 1, False)
-    five_rows = PriceTrackerApp._screenshot_lookup_overlay_height(330, 5, False)
-    scrollable = PriceTrackerApp._screenshot_lookup_overlay_height(340, 8, True)
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    app.config = SimpleNamespace(font_size=15)
+
+    one_row = app._screenshot_lookup_overlay_height(62, 1, False)
+    five_rows = app._screenshot_lookup_overlay_height(330, 5, False)
+    scrollable = app._screenshot_lookup_overlay_height(340, 8, True)
 
     assert one_row < 160
     assert five_rows > one_row
@@ -283,6 +317,18 @@ def test_version_status_text_appends_status_after_version():
     assert text.endswith(" · 最新版")
 
 
+def test_version_status_update_state_is_derived_from_info_or_text():
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    app.version_update_available = False
+    app.latest_update_info = UpdateInfo(True, "0.4.10", "1.0.0", "", "", "found")
+
+    assert app._version_status_has_update("v0.4.10 · 最新版")
+
+    app.latest_update_info = None
+    assert app._version_status_has_update("v0.4.10 · 有更新，点击手动下载")
+    assert not app._version_status_has_update("v0.4.10 · 最新版")
+
+
 def test_realtime_submission_credit_uses_new_items_and_significant_price_changes():
     app = PriceTrackerApp.__new__(PriceTrackerApp)
     app.db = _Db()
@@ -312,7 +358,7 @@ def test_realtime_import_save_uses_parsed_price_not_editable_fields():
     db = _RealtimeDb()
     app.db = db
     app.realtime_import_confirmed = True
-    app.realtime_item_var = _Var("用户修正物品")
+    app.realtime_item_var = _Var("神圣石")
     app.realtime_side_var = _Var("卖出")
     app.realtime_amount_var = _Var("999999")
     app.realtime_currency_var = _Var("混沌石")
@@ -343,10 +389,75 @@ def test_realtime_import_save_uses_parsed_price_not_editable_fields():
 
     app.save_market_exchange_record(show_message=False)
 
-    assert db.record["item_name"] == "用户修正物品"
+    assert db.record["item_name"] == "神圣石"
     assert db.record["side"] == "卖出"
     assert db.record["amount"] == 150
     assert db.record["currency"] == "崇高石"
+
+
+def test_realtime_import_rejects_item_name_rewrite_over_half(monkeypatch):
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    db = _RealtimeDb()
+    warnings = {}
+    app.db = db
+    app.realtime_import_confirmed = True
+    app.realtime_item_var = _Var("完全乱编物品")
+    app.realtime_side_var = _Var("卖出")
+    app.market_exchange_parsed = ParsedMarketExchange(want_item="先祖密藏日志")
+    app.realtime_price_parsed = ParsedRealtimePrice(
+        item_name="先祖密藏日志",
+        side="买入",
+        amount=12,
+        currency="神圣石",
+        confidence=0.9,
+    )
+    app.market_exchange_raw_text = "raw"
+    app.market_exchange_image_path = Path("shot.png")
+    app.status_var = _Var()
+    monkeypatch.setattr(app_module.messagebox, "showwarning", lambda title, message: warnings.update(title=title, message=message))
+
+    app.save_market_exchange_record(show_message=False)
+
+    assert db.record is None
+    assert warnings["title"] == "物品名修改过多"
+
+
+def test_realtime_import_allows_small_item_name_correction():
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    app.market_exchange_parsed = ParsedMarketExchange(want_item="先祖密藏日志")
+    app.realtime_price_parsed = ParsedRealtimePrice(item_name="先祖密藏日志")
+
+    assert app._validate_realtime_item_name_edit("先祖秘藏日志")[0]
+    assert not app._validate_realtime_item_name_edit("完全乱编物品")[0]
+
+
+def test_realtime_import_name_validation_updates_inline_message():
+    app = PriceTrackerApp.__new__(PriceTrackerApp)
+    submit = _Label()
+    message = _Label()
+    item_note = _Label()
+    hint = _Label()
+    app.realtime_import_labels = {
+        "submit": submit,
+        "message": message,
+        "item_note": item_note,
+        "hint": hint,
+    }
+    app.realtime_import_confirmed = True
+    app.realtime_item_var = _Var("完全乱编物品")
+    app.market_exchange_parsed = ParsedMarketExchange(want_item="先祖密藏日志")
+    app.realtime_price_parsed = ParsedRealtimePrice(
+        item_name="先祖密藏日志",
+        amount=12,
+        currency="神圣石",
+    )
+
+    app._update_realtime_import_submit_state(update_message=True)
+
+    assert submit.state == "disabled"
+    assert item_note.text == "修改过多"
+    assert "物品名修改过多" in message.text
+    assert "价格比例不允许手动修改" in hint.text
 
 
 def test_realtime_import_ratio_label_uses_market_ratio():

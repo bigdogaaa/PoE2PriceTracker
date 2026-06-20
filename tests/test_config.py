@@ -1,7 +1,10 @@
 from poe2_price_tracker.config import AppConfig, GITEE_UPDATE_MANIFEST_URL, GITHUB_UPDATE_MANIFEST_URL, effective_update_manifest
 from poe2_price_tracker.config import default_ocr_cpu_threads
+from poe2_price_tracker.config import _apply_font_size_migration
+from poe2_price_tracker.config import FONT_SIZE_MIGRATION_VERSION
 from poe2_price_tracker.config import normalize_extra_update_manifest, should_reset_update_manifest
 from poe2_price_tracker.config import normalize_price_share_service_url
+from poe2_price_tracker.themes import THEME_LABELS, normalize_theme_key, theme_key_for_label, theme_label_for_key
 
 
 def test_local_price_share_service_url_is_migrated_to_default():
@@ -28,6 +31,31 @@ def test_default_config_keeps_github_as_deletable_fallback_and_directml_ocr():
     assert config.ocr_execution_provider == "directml"
     assert config.ocr_cpu_threads == default_ocr_cpu_threads()
     assert config.price_decimal_places == 3
+    assert config.ui_theme == "poe2"
+    assert config.font_size == 20
+
+
+def test_font_size_migration_forces_twenty_once():
+    config = AppConfig(font_size=13, font_size_configured=True, font_size_migration_version="")
+
+    _apply_font_size_migration(config, {"font_size": 13, "font_size_configured": True})
+
+    assert config.font_size == 20
+    assert config.font_size_migration_version == FONT_SIZE_MIGRATION_VERSION
+
+    config.font_size = 24
+    _apply_font_size_migration(config, {"font_size_migration_version": FONT_SIZE_MIGRATION_VERSION})
+
+    assert config.font_size == 24
+
+
+def test_theme_keys_and_labels_are_stable():
+    assert THEME_LABELS == ("白色", "深色", "黑金")
+    assert normalize_theme_key("night") == "night"
+    assert normalize_theme_key("unknown") == "default"
+    assert theme_label_for_key("poe2") == "黑金"
+    assert theme_key_for_label("深色") == "night"
+    assert theme_key_for_label("bad label") == "default"
 
 
 def test_legacy_update_manifests_are_reset():

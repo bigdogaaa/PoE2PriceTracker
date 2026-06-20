@@ -1,3 +1,13 @@
+param(
+    [ValidateSet("syntax", "unit", "gui", "all", "clean")]
+    [string]$Suite = "unit",
+    [string]$K = "",
+    [switch]$KeepCache
+)
+
+& (Join-Path $PSScriptRoot "test_runner.ps1") -Suite $Suite -K $K -KeepCache:$KeepCache
+return
+
 $ErrorActionPreference = "Stop"
 $Root = Split-Path -Parent $PSScriptRoot
 Set-Location $Root

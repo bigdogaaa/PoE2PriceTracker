@@ -1,3 +1,7 @@
+﻿# Copyright (c) 2026 大狗狗
+# This file is part of this project and is licensed under the GNU GPL-3.0-only.
+# See the LICENSE file for details.
+
 from __future__ import annotations
 
 import queue
@@ -19,6 +23,7 @@ from datetime import datetime
 from pathlib import Path
 from tkinter import (
     BOTH,
+    BOTTOM,
     END,
     LEFT,
     RIGHT,
@@ -42,6 +47,7 @@ from tkinter import (
     messagebox,
 )
 from tkinter import ttk
+from tkinter import font as tkfont
 from PIL import Image, ImageDraw, ImageEnhance, ImageTk
 try:
     import pystray
@@ -59,6 +65,7 @@ Combobox = ttk.Combobox
 
 ERROR_ALREADY_EXISTS = 183
 _INSTANCE_MUTEX_HANDLE = None
+FREE_SOFTWARE_NOTICE = "调整了开源共享协议：源代码按 GPL-3.0-only 发布；官方品牌资源、自动更新与云端服务不随 GPL 授权，商业合作需单独授权。"
 
 
 def format_price_amount(amount: float, decimal_places: int = 3) -> str:
@@ -282,12 +289,13 @@ from .db import (
     convert_amount,
     display_amount_for_item,
     normalize_name,
+    recent_trend_values,
     trend_percent,
 )
 from .hotkeys import GlobalHotkeys, parse_hotkey
 from .market_exchange import ParsedMarketExchange, ParsedRealtimePrice, derive_realtime_price, parse_market_exchange
 from .ocr import RapidOcr
-from .parser import ParsedItemPrice, ParsedPrice, find_number, meaningful_lines, parse_item_price_rows, parse_ocr_text
+from .parser import ParsedItemPrice, ParsedPrice, find_number, meaningful_lines, parse_ocr_text
 from .poe2db_sync import fetch_all_economy_prices
 from .realtime_sync import RealtimeSyncClient, RemoteRealtimePrice
 from .secure_config import RedisCredentials, load_redis_credentials
@@ -301,7 +309,7 @@ from .screenshot import (
     prepare_image_for_ocr,
     save_image,
 )
-from .structure import RecognizedItemCandidate, recognize_item_candidates, recognize_structured_prices
+from .structure import RecognizedItemCandidate, recognize_item_candidates
 from .themes import AppTheme, THEME_LABELS, theme_for_key, theme_key_for_label, theme_label_for_key
 from .updater import UpdateInfo, check_update, download_update
 
@@ -683,13 +691,38 @@ class ScreenshotSelectionOverlay:
         self.action_window = Toplevel(self.window)
         self.action_window.overrideredirect(True)
         self.action_window.attributes("-topmost", True)
-        action_x = self.screen_left + max(0, min(x + 12, max(0, self.screen_width - 180)))
-        action_y = self.screen_top + max(0, min(y + 12, max(0, self.screen_height - 58)))
+        action_width = 260
+        action_height = 104
+        action_x = self.screen_left + max(12, min(x + 14, max(12, self.screen_width - action_width - 12)))
+        action_y = self.screen_top + max(12, min(y + 14, max(12, self.screen_height - action_height - 12)))
         self.action_window.geometry(f"+{action_x}+{action_y}")
-        frame = Frame(self.action_window, padx=8, pady=8, bg="#20242a")
-        frame.pack()
-        Button(frame, text="确认", command=self.confirm).pack(side=LEFT)
-        Button(frame, text="取消", command=self.cancel).pack(side=LEFT, padx=(8, 0))
+        card = Frame(
+            self.action_window,
+            padx=14,
+            pady=12,
+            bg="#171c23",
+            highlightthickness=1,
+            highlightbackground="#475569",
+        )
+        card.pack(fill=BOTH, expand=True)
+        Label(
+            card,
+            text="确认识别此区域",
+            fg="#f8fafc",
+            bg="#171c23",
+            font=("Microsoft YaHei UI", 11, "bold"),
+        ).pack(anchor="w")
+        Label(
+            card,
+            text="Esc 取消，也可以重新拖拽选择。",
+            fg="#a7b2c3",
+            bg="#171c23",
+            font=("Microsoft YaHei UI", 9),
+        ).pack(anchor="w", pady=(2, 10))
+        buttons = Frame(card, bg="#171c23")
+        buttons.pack(fill=X)
+        Button(buttons, text="确认", command=self.confirm, style="Accent.TButton").pack(side=LEFT)
+        Button(buttons, text="取消", command=self.cancel, style="Overlay.TButton").pack(side=LEFT, padx=(10, 0))
 
     def confirm(self) -> None:
         if not self.box:
@@ -764,7 +797,7 @@ class OcrReviewDialog:
         actions = Frame(body)
         actions.pack(fill=X, pady=(12, 0))
         Button(actions, text="入库选中", command=self.save_selected).pack(side=RIGHT)
-        Button(actions, text="全部入库", command=self.save_all).pack(side=RIGHT, padx=(0, 8))
+        Button(actions, text="全部入库", command=self.save_all, style="Accent.TButton").pack(side=RIGHT, padx=(0, 8))
         Button(actions, text="查看识别原文", command=self.show_raw).pack(side=LEFT)
 
     def _filter_currency(self, _event=None) -> None:
@@ -881,7 +914,7 @@ class RegionOcrWorkbench:
 
         actions = LabelFrame(right, text="2. 识别", padx=12, pady=12)
         actions.pack(fill=X, pady=(14, 0))
-        Button(actions, text="识别框选区域", command=self.recognize_regions).pack(fill=X)
+        Button(actions, text="识别框选区域", command=self.recognize_regions, style="Accent.TButton").pack(fill=X)
         Button(actions, text="清空框选", command=self.clear_regions).pack(fill=X, pady=(8, 0))
         Label(actions, textvariable=self.status_var, wraplength=320, justify=LEFT).pack(anchor="w", pady=(10, 0))
 
@@ -893,7 +926,7 @@ class RegionOcrWorkbench:
         Entry(result, textvariable=self.amount_var).pack(fill=X, pady=(0, 8))
         Label(result, text="价格单位").pack(anchor="w")
         Combobox(result, textvariable=self.currency_var, values=BASE_CURRENCIES).pack(fill=X, pady=(0, 10))
-        Button(result, text="保存到价格库", command=self.save_record).pack(fill=X)
+        Button(result, text="保存到价格库", command=self.save_record, style="Accent.TButton").pack(fill=X)
 
         raw_box = LabelFrame(right, text="识别原文", padx=12, pady=12)
         raw_box.pack(fill=BOTH, expand=True, pady=(14, 0))
@@ -1050,6 +1083,7 @@ class PriceTrackerApp:
         self.hotkeys = GlobalHotkeys()
         self.events: queue.Queue[object] = queue.Queue()
         self._draining_events = False
+        self.nav_items = []
 
         self.search_var = StringVar()
         self.focus_search_var = StringVar()
@@ -1103,6 +1137,7 @@ class PriceTrackerApp:
         self.quick_price_overlay_watch_token = 0
         self.realtime_import_overlay = None
         self.realtime_import_labels = {}
+        self.realtime_import_name_validation_job = None
         self.focus_search_overlay = None
         self.focus_search_entry = None
         self.focus_search_results = None
@@ -1170,6 +1205,7 @@ class PriceTrackerApp:
         self.version_status_frame = None
         self.version_status_prefix_label = None
         self.version_status_link_label = None
+        self.column_settings_window = None
         self.version_update_available = False
         self.update_dialog_window = None
         self.update_dialog_version = ""
@@ -1179,13 +1215,15 @@ class PriceTrackerApp:
 
         self.root.title(f"流放之路2 物价追踪 v{__version__}")
         self._apply_window_icon()
-        self.root.minsize(980, 640)
         self._configure_style()
+        min_width, min_height = self._root_min_size()
+        self.root.minsize(min_width, min_height)
         self._build_menu()
         self._build_ui()
         self._apply_theme_to_widget_tree(self.root)
         self.root.update_idletasks()
-        self._set_root_initial_geometry(1120, 760)
+        initial_width, initial_height = self._root_initial_size()
+        self._set_root_initial_geometry(initial_width, initial_height)
         try:
             self.root.deiconify()
         except Exception:
@@ -1219,6 +1257,32 @@ class PriceTrackerApp:
         left, top, right, bottom = self._current_monitor_work_area()
         x, y = self._center_rect_in_bounds(width, height, (left, top, right, bottom))
         self.root.geometry(f"{width}x{height}+{x}+{y}")
+
+    def _root_min_size(self) -> tuple[int, int]:
+        return self._scaled(1040, 980, 1560), self._scaled(680, 640, 980)
+
+    def _root_initial_size(self) -> tuple[int, int]:
+        min_width, min_height = self._root_min_size()
+        left, top, right, bottom = self._current_monitor_work_area()
+        available_width = max(1, right - left - 48)
+        available_height = max(1, bottom - top - 48)
+        desired_width = self._scaled(1180, 1120, 1720)
+        desired_height = self._scaled(800, 760, 1080)
+        width = min(available_width, max(min_width, desired_width))
+        height = min(available_height, max(min_height, desired_height))
+        return int(width), int(height)
+
+    def _apply_root_size_for_font(self) -> None:
+        min_width, min_height = self._root_min_size()
+        try:
+            self.root.minsize(min_width, min_height)
+            current_width = max(1, int(self.root.winfo_width()))
+            current_height = max(1, int(self.root.winfo_height()))
+            if current_width < min_width or current_height < min_height:
+                width, height = self._root_initial_size()
+                self._set_root_initial_geometry(width, height)
+        except Exception:
+            pass
 
     def _current_monitor_work_area(self) -> tuple[int, int, int, int]:
         point = self._cursor_screen_position()
@@ -1290,7 +1354,8 @@ class PriceTrackerApp:
             style.theme_use(theme.ttk_theme if tb is not None else "clam")
         except Exception:
             pass
-        size = int(getattr(self.config, "font_size", 13))
+        size = self._global_font_size()
+        self._apply_global_font_defaults(size)
         rowheight = max(72, size * 3 + 26)
         font = ("Microsoft YaHei UI", size)
         heading_font = ("Microsoft YaHei UI", size, "bold")
@@ -1298,6 +1363,7 @@ class PriceTrackerApp:
             self.root.configure(bg=theme.background)
         except Exception:
             pass
+        self._apply_native_title_bar_theme(self.root)
         style.configure(".", font=font, background=theme.background, foreground=theme.text)
         style.configure("TFrame", background=theme.background)
         style.configure("Surface.TFrame", background=theme.surface)
@@ -1311,7 +1377,105 @@ class PriceTrackerApp:
             foreground=theme.text,
             font=("Microsoft YaHei UI", size, "bold"),
         )
-        style.configure("TButton", padding=(12, 7), font=("Microsoft YaHei UI", size))
+        style.configure(
+            "TButton",
+            padding=(max(14, size), max(8, size // 2)),
+            font=("Microsoft YaHei UI", size),
+            foreground=theme.text,
+            background=theme.surface_alt,
+            bordercolor=theme.border,
+            focuscolor=theme.primary,
+            relief="flat",
+            borderwidth=1,
+        )
+        try:
+            style.map(
+                "TButton",
+                background=[
+                    ("disabled", theme.surface),
+                    ("active", theme.selection_bg),
+                    ("pressed", theme.primary),
+                ],
+                foreground=[
+                    ("disabled", theme.subtle),
+                    ("active", theme.text),
+                    ("pressed", theme.primary_text),
+                ],
+            )
+        except Exception:
+            pass
+        style.configure(
+            "Footer.TButton",
+            padding=(max(12, size - 1), max(7, size // 3)),
+            font=("Microsoft YaHei UI", size),
+            foreground=theme.text,
+            background=theme.surface_alt,
+            bordercolor=theme.border,
+            relief="flat",
+            borderwidth=1,
+        )
+        try:
+            style.map(
+                "Footer.TButton",
+                background=[("active", theme.selection_bg), ("pressed", theme.primary)],
+                foreground=[("active", theme.text), ("pressed", theme.primary_text)],
+            )
+        except Exception:
+            pass
+        style.configure(
+            "NavItem.TFrame",
+            background=theme.sidebar,
+        )
+        style.configure("NavItemHover.TFrame", background=theme.surface_alt)
+        style.configure("NavStrip.TFrame", background=theme.sidebar)
+        style.configure("NavStripHover.TFrame", background=theme.primary)
+        style.configure(
+            "NavItem.TLabel",
+            background=theme.sidebar,
+            foreground=theme.text,
+            font=("Microsoft YaHei UI", size, "bold"),
+            padding=(max(14, size), 0),
+        )
+        style.configure(
+            "NavItemHover.TLabel",
+            background=theme.surface_alt,
+            foreground=theme.text,
+            font=("Microsoft YaHei UI", size, "bold"),
+            padding=(max(14, size), 0),
+        )
+        style.configure(
+            "Ghost.TButton",
+            padding=(max(14, size), max(8, size // 2)),
+            font=("Microsoft YaHei UI", size),
+            foreground=theme.text,
+            background=theme.surface_alt,
+            bordercolor=theme.subtle,
+            relief="solid",
+            borderwidth=1,
+        )
+        style.configure(
+            "Overlay.TButton",
+            padding=(max(16, size + 2), max(9, size // 2)),
+            font=("Microsoft YaHei UI", size, "bold"),
+            foreground=theme.overlay_text,
+            background=theme.overlay_surface,
+            bordercolor=theme.overlay_border,
+            relief="flat",
+            borderwidth=1,
+        )
+        try:
+            style.map(
+                "Ghost.TButton",
+                background=[("active", theme.selection_bg), ("pressed", theme.surface_alt)],
+                foreground=[("active", theme.text), ("pressed", theme.text)],
+            )
+            style.map(
+                "Overlay.TButton",
+                background=[("active", theme.selection_bg), ("pressed", theme.primary)],
+                foreground=[("active", theme.text), ("pressed", theme.primary_text)],
+            )
+        except Exception:
+            pass
         style.configure("TEntry", fieldbackground=theme.input_bg, foreground=theme.text, bordercolor=theme.border)
         style.configure(
             "TCombobox",
@@ -1319,9 +1483,19 @@ class PriceTrackerApp:
             background=theme.input_bg,
             foreground=theme.text,
             bordercolor=theme.border,
-            arrowsize=14,
+            arrowsize=max(14, size),
         )
+        settings_check_bg = theme.surface
         style.configure("TCheckbutton", background=theme.background, foreground=theme.text)
+        style.configure("Settings.TCheckbutton", background=settings_check_bg, foreground=theme.text)
+        try:
+            style.map(
+                "Settings.TCheckbutton",
+                background=[("active", settings_check_bg), ("pressed", settings_check_bg)],
+                foreground=[("active", theme.text), ("pressed", theme.text)],
+            )
+        except Exception:
+            pass
         style.configure("TNotebook", background=theme.background, borderwidth=0)
         style.configure("TNotebook.Tab", padding=(16, 8), font=("Microsoft YaHei UI", size, "bold"))
         style.configure(
@@ -1373,14 +1547,108 @@ class PriceTrackerApp:
             background=theme.primary,
             padding=(14, 7),
         )
+        style.configure(
+            "Danger.TButton",
+            foreground="#ffffff",
+            background=theme.danger,
+            padding=(14, 7),
+        )
         try:
             style.map(
                 "Accent.TButton",
                 background=[("active", theme.primary_hover), ("pressed", theme.primary_hover)],
                 foreground=[("active", theme.primary_text), ("pressed", theme.primary_text)],
             )
+            style.map(
+                "Danger.TButton",
+                background=[("active", theme.danger), ("pressed", theme.danger)],
+                foreground=[("active", "#ffffff"), ("pressed", "#ffffff")],
+            )
         except Exception:
             pass
+        try:
+            self.root.bind_class("TCombobox", "<MouseWheel>", lambda _event: "break")
+            self.root.bind_class("TCombobox", "<Button-4>", lambda _event: "break")
+            self.root.bind_class("TCombobox", "<Button-5>", lambda _event: "break")
+        except Exception:
+            pass
+
+    def _global_font_size(self) -> int:
+        try:
+            return max(13, min(24, int(getattr(self.config, "font_size", 20))))
+        except (TypeError, ValueError):
+            return 20
+
+    def _scaled(self, value: int, minimum: int | None = None, maximum: int | None = None) -> int:
+        scaled = round(value * self._global_font_size() / 15)
+        if minimum is not None:
+            scaled = max(minimum, scaled)
+        if maximum is not None:
+            scaled = min(maximum, scaled)
+        return int(scaled)
+
+    def _ui_font(self, delta: int = 0, weight: str = "normal") -> tuple[str, int] | tuple[str, int, str]:
+        size = max(9, self._global_font_size() + int(delta))
+        if weight and weight != "normal":
+            return ("Microsoft YaHei UI", size, weight)
+        return ("Microsoft YaHei UI", size)
+
+    @staticmethod
+    def _hex_to_colorref(value: str) -> int:
+        text = str(value or "#000000").strip().lstrip("#")
+        if len(text) != 6:
+            text = "000000"
+        red = int(text[0:2], 16)
+        green = int(text[2:4], 16)
+        blue = int(text[4:6], 16)
+        return red | (green << 8) | (blue << 16)
+
+    @staticmethod
+    def _color_is_dark(value: str) -> bool:
+        text = str(value or "").strip().lstrip("#")
+        if len(text) != 6:
+            return False
+        try:
+            red = int(text[0:2], 16) / 255
+            green = int(text[2:4], 16) / 255
+            blue = int(text[4:6], 16) / 255
+        except ValueError:
+            return False
+        luminance = 0.2126 * red + 0.7152 * green + 0.0722 * blue
+        return luminance < 0.42
+
+    def _apply_native_title_bar_theme(self, window=None) -> None:
+        if os.name != "nt":
+            return
+        target = window or self.root
+        try:
+            hwnd = int(target.winfo_id())
+            dwm = ctypes.windll.dwmapi
+            dark = ctypes.c_int(1 if self.theme.is_dark else 0)
+            dwm.DwmSetWindowAttribute(hwnd, 20, ctypes.byref(dark), ctypes.sizeof(dark))
+            caption = ctypes.c_int(self._hex_to_colorref(self.theme.sidebar if self.theme.is_dark else self.theme.surface))
+            text = ctypes.c_int(self._hex_to_colorref(self.theme.text))
+            dwm.DwmSetWindowAttribute(hwnd, 35, ctypes.byref(caption), ctypes.sizeof(caption))
+            dwm.DwmSetWindowAttribute(hwnd, 36, ctypes.byref(text), ctypes.sizeof(text))
+        except Exception:
+            pass
+
+    def _apply_global_font_defaults(self, size: int) -> None:
+        fonts = {
+            "TkDefaultFont": ("Microsoft YaHei UI", size, "normal"),
+            "TkTextFont": ("Microsoft YaHei UI", size, "normal"),
+            "TkMenuFont": ("Microsoft YaHei UI", size, "normal"),
+            "TkHeadingFont": ("Microsoft YaHei UI", size, "bold"),
+            "TkCaptionFont": ("Microsoft YaHei UI", size, "normal"),
+            "TkSmallCaptionFont": ("Microsoft YaHei UI", max(10, size - 2), "normal"),
+            "TkIconFont": ("Microsoft YaHei UI", size, "normal"),
+            "TkTooltipFont": ("Microsoft YaHei UI", max(10, size - 1), "normal"),
+        }
+        for name, (family, font_size, weight) in fonts.items():
+            try:
+                tkfont.nametofont(name).configure(family=family, size=font_size, weight=weight)
+            except Exception:
+                continue
 
     def _tk_theme_defaults(self) -> set[str]:
         return {
@@ -1411,6 +1679,8 @@ class PriceTrackerApp:
         defaults = self._tk_theme_defaults()
 
         def apply_one(current) -> None:
+            if getattr(current, "_skip_theme_refresh", False):
+                return
             try:
                 cls = str(current.winfo_class())
             except Exception:
@@ -1424,10 +1694,29 @@ class PriceTrackerApp:
                 elif cls == "Label":
                     current_bg = str(current.cget("bg"))
                     current_fg = str(current.cget("fg"))
+                    value_kind = getattr(current, "_overlay_value_label", "")
+                    if value_kind == "price":
+                        current.configure(fg=self._overlay_price_color())
+                    elif value_kind == "trend":
+                        text = str(current.cget("text") or "")
+                        trend = text.replace("趋势", "", 1).lstrip(" ：:") if text.startswith("趋势") else text
+                        current.configure(fg=self._overlay_trend_color(trend))
                     if current_bg in defaults:
                         current.configure(bg=theme.background)
-                    if current_fg in defaults:
+                    if current_fg in defaults and not getattr(current, "_preserve_theme_fg", False):
                         current.configure(fg=theme.text)
+                elif cls == "Button":
+                    current.configure(
+                        bg=theme.primary,
+                        fg=theme.primary_text,
+                        activebackground=theme.primary_hover,
+                        activeforeground=theme.primary_text,
+                        relief="flat",
+                        bd=0,
+                        highlightthickness=0,
+                        padx=max(10, self._global_font_size() - 2),
+                        pady=max(5, self._global_font_size() // 3),
+                    )
                 elif cls == "Canvas":
                     current_bg = str(current.cget("bg"))
                     if current_bg in defaults:
@@ -1457,7 +1746,29 @@ class PriceTrackerApp:
         except Exception:
             pass
         try:
-            self.sidebar.configure(bg=theme.sidebar)
+            self.sidebar.configure(
+                bg=theme.sidebar,
+                width=self._sidebar_width(),
+                padx=self._scaled(16, 16, 26),
+                pady=self._scaled(18, 18, 30),
+            )
+        except Exception:
+            pass
+        try:
+            self.sidebar_title.configure(
+                bg=theme.sidebar,
+                fg=theme.text,
+                font=self._ui_font(3, "bold"),
+                wraplength=max(120, self._sidebar_width() - self._scaled(32, 32, 48)),
+            )
+        except Exception:
+            pass
+        try:
+            self.sidebar_spacer.configure(bg=theme.sidebar)
+        except Exception:
+            pass
+        try:
+            self._refresh_nav_items()
         except Exception:
             pass
         try:
@@ -1470,6 +1781,10 @@ class PriceTrackerApp:
                 tree.tag_configure("pinned", background=theme.pinned)
             except Exception:
                 pass
+        try:
+            self._refresh_version_status_widget(self.version_status_var.get(), self.version_update_available)
+        except Exception:
+            pass
 
     def _build_menu(self) -> None:
         menu = Menu(self.root)
@@ -1561,16 +1876,31 @@ class PriceTrackerApp:
         shell = Frame(self.root, padx=0, pady=0)
         shell.pack(fill=BOTH, expand=True)
 
-        self.sidebar = Frame(shell, padx=16, pady=18, width=210)
+        sidebar_width = self._sidebar_width()
+        sidebar_pad_x = self._scaled(16, 16, 24)
+        sidebar_pad_y = self._scaled(18, 18, 28)
+        self.sidebar = Frame(shell, padx=sidebar_pad_x, pady=sidebar_pad_y, width=sidebar_width)
         self.sidebar.pack(side=LEFT, fill="y")
         self.sidebar.pack_propagate(False)
-        Label(self.sidebar, text="流放之路2 物价", font=("Microsoft YaHei UI", 18, "bold")).pack(
+        self.sidebar_title = Label(
+            self.sidebar,
+            text="流放之路2 物价",
+            font=self._ui_font(3, "bold"),
             anchor="w",
-            pady=(0, 18),
+            justify=LEFT,
+            wraplength=max(120, sidebar_width - sidebar_pad_x * 2),
+        )
+        self.sidebar_title._skip_theme_refresh = True
+        self.sidebar_title.pack(
+            anchor="w",
+            fill=X,
+            pady=(0, self._scaled(18, 18, 28)),
         )
         self._nav_button("物价列表", self.show_market_page).pack(fill=X, pady=4)
         self._nav_button("收藏列表", self.show_favorites_page).pack(fill=X, pady=4)
-        Frame(self.sidebar).pack(fill=BOTH, expand=True)
+        self.sidebar_spacer = Frame(self.sidebar)
+        self.sidebar_spacer._skip_theme_refresh = True
+        self.sidebar_spacer.pack(fill=BOTH, expand=True)
         self._nav_button("配置", self.show_settings_page).pack(side="bottom", fill=X, pady=4)
         self._nav_button(
             "同步经济数据",
@@ -1585,22 +1915,110 @@ class PriceTrackerApp:
         self._nav_button("手动记录", self.show_manual_record_page).pack(side="bottom", fill=X, pady=4)
         self._nav_button("截图识别", self.show_ocr_review_page).pack(side="bottom", fill=X, pady=4)
 
-        self.content = Frame(shell, padx=22, pady=18)
+        self.content = Frame(shell, padx=self._scaled(22, 22, 34), pady=self._scaled(18, 18, 28))
         self.content.pack(side=LEFT, fill=BOTH, expand=True)
         self.show_market_page()
 
+    def _sidebar_width(self) -> int:
+        return self._scaled(240, 230, 420)
+
+    def _nav_item_height(self) -> int:
+        return max(self._scaled(44, 42, 82), self._global_font_size() * 2 + self._scaled(14, 12, 24))
+
     def _nav_button(self, text: str, command, tooltip_text: str = ""):
-        button = Button(self.sidebar, text=text, command=command)
+        item = ttk.Frame(
+            self.sidebar,
+            style="NavItem.TFrame",
+            cursor="hand2",
+            height=self._nav_item_height(),
+        )
+        item.pack_propagate(False)
+        strip = ttk.Frame(item, width=self._scaled(3, 3, 5), style="NavStrip.TFrame")
+        strip.pack(side=LEFT, fill=Y)
+        label = ttk.Label(
+            item,
+            text=text,
+            anchor="w",
+            cursor="hand2",
+            style="NavItem.TLabel",
+            wraplength=max(120, self._sidebar_width() - self._scaled(48, 44, 76)),
+        )
+        label.pack(side=LEFT, fill=BOTH, expand=True)
+        item._nav_strip = strip
+        item._nav_label = label
+        item._nav_hover = False
+        self.nav_items.append(item)
+        self._style_nav_item(item, hover=False)
+
+        def enter(_event=None) -> None:
+            item._nav_hover = True
+            self._style_nav_item(item, hover=True)
+
+        def leave(_event=None) -> None:
+            item._nav_hover = False
+            self._style_nav_item(item, hover=False)
+
+        def click(_event=None):
+            self._style_nav_item(item, hover=True)
+            command()
+            return "break"
+
+        self._bind_nav_item_recursive(item, enter, leave, click)
         if tooltip_text:
-            HoverTooltip(button, tooltip_text)
-        return button
+            HoverTooltip(item, tooltip_text)
+            HoverTooltip(label, tooltip_text)
+        return item
+
+    def _bind_nav_item_recursive(self, widget, enter, leave, click) -> None:
+        try:
+            widget.bind("<Enter>", enter, add="+")
+            widget.bind("<Leave>", leave, add="+")
+            widget.bind("<Button-1>", click, add="+")
+        except Exception:
+            pass
+        for child in widget.winfo_children():
+            self._bind_nav_item_recursive(child, enter, leave, click)
+
+    def _style_nav_item(self, item, hover: bool = False) -> None:
+        frame_style = "NavItemHover.TFrame" if hover else "NavItem.TFrame"
+        strip_style = "NavStripHover.TFrame" if hover else "NavStrip.TFrame"
+        label_style = "NavItemHover.TLabel" if hover else "NavItem.TLabel"
+        try:
+            item.configure(style=frame_style)
+        except Exception:
+            pass
+        for attr, style_name in (("_nav_strip", strip_style), ("_nav_label", label_style)):
+            widget = getattr(item, attr, None)
+            if widget is None:
+                continue
+            try:
+                widget.configure(style=style_name)
+            except Exception:
+                pass
+
+    def _refresh_nav_items(self) -> None:
+        for item in list(getattr(self, "nav_items", [])):
+            try:
+                if item.winfo_exists():
+                    item.configure(height=self._nav_item_height())
+                    label = getattr(item, "_nav_label", None)
+                    if label is not None:
+                        label.configure(wraplength=max(120, self._sidebar_width() - self._scaled(48, 44, 76)))
+                    self._style_nav_item(item, hover=bool(getattr(item, "_nav_hover", False)))
+            except Exception:
+                continue
 
     def _build_version_status_widget(self, parent):
         frame = Frame(parent)
+        frame._skip_theme_refresh = True
         self.version_status_frame = frame
-        self.version_status_prefix_label = Label(frame, text="", foreground="#667085")
+        self.version_status_prefix_label = Label(frame, text="", fg="#667085")
+        self.version_status_prefix_label._skip_theme_refresh = True
+        self.version_status_prefix_label._preserve_theme_fg = True
         self.version_status_prefix_label.pack(side=LEFT)
-        self.version_status_link_label = Label(frame, text="", foreground="#667085")
+        self.version_status_link_label = Label(frame, text="", fg="#667085")
+        self.version_status_link_label._skip_theme_refresh = True
+        self.version_status_link_label._preserve_theme_fg = True
         self.version_status_link_label.pack(side=LEFT)
         self.version_status_label = self.version_status_link_label
         self._refresh_version_status_widget(self.version_status_var.get(), self.version_update_available)
@@ -1612,23 +2030,37 @@ class PriceTrackerApp:
 
     def _set_version_update_status(self, status: str, available: bool = False) -> None:
         text = self._version_status_text(status)
-        self.version_update_available = available
+        self.version_update_available = self._version_status_has_update(text, available)
         try:
             self.version_status_var.set(text)
         except Exception:
             pass
-        self._refresh_version_status_widget(text, available)
+        self._refresh_version_status_widget(text, self.version_update_available)
         try:
             self.root.title(f"流放之路2 物价追踪 {text}")
         except Exception:
             pass
+
+    def _version_status_has_update(self, text: str = "", available: bool | None = None) -> bool:
+        if available is not None and available:
+            return True
+        info = getattr(self, "latest_update_info", None)
+        if info is not None and bool(getattr(info, "available", False)):
+            return True
+        if available is None and bool(getattr(self, "version_update_available", False)):
+            return True
+        text = str(text or "")
+        return "有更新" in text or "点击手动下载" in text or "点击下载" in text
 
     def _refresh_version_status_widget(self, text: str, available: bool = False) -> None:
         prefix = getattr(self, "version_status_prefix_label", None)
         link = getattr(self, "version_status_link_label", None)
         if prefix is None or link is None:
             return
-        color = "#d92d20" if available else "#667085"
+        theme = getattr(self, "theme", theme_for_key("default"))
+        available = self._version_status_has_update(text, available)
+        self.version_update_available = available
+        color = "#d92d20" if available else theme.muted
         base_font = ("Microsoft YaHei UI", max(10, int(getattr(self.config, "font_size", 13))))
         link_font = (base_font[0], base_font[1], "underline")
         prefix_text = text
@@ -1640,21 +2072,37 @@ class PriceTrackerApp:
                     link_text = candidate
                     break
         try:
-            prefix.configure(text=prefix_text, foreground=color, font=base_font)
+            frame = getattr(self, "version_status_frame", None)
+            if frame is not None:
+                frame.configure(bg=theme.background)
+            prefix.configure(text=prefix_text, fg=color, foreground=color, bg=theme.background, font=base_font)
             link.configure(
                 text=link_text,
+                fg=color,
                 foreground=color,
+                bg=theme.background,
                 cursor="hand2" if link_text else "",
                 font=link_font if link_text else base_font,
             )
             if link_text:
                 link.bind("<Button-1>", self.open_update_download)
-                link.bind("<Enter>", lambda _event: link.configure(foreground="#b42318"))
-                link.bind("<Leave>", lambda _event: link.configure(foreground=color))
+                link.bind("<Enter>", lambda _event: link.configure(fg=theme.primary_hover, foreground=theme.primary_hover))
+                link.bind("<Leave>", lambda _event: link.configure(fg=color, foreground=color))
             else:
                 link.unbind("<Button-1>")
                 link.unbind("<Enter>")
                 link.unbind("<Leave>")
+        except Exception:
+            pass
+
+    def _refresh_version_status_widget_later(self) -> None:
+        def refresh() -> None:
+            self._refresh_version_status_widget(self.version_status_var.get(), self.version_update_available)
+
+        try:
+            self.root.after_idle(refresh)
+            self.root.after(80, refresh)
+            self.root.after(220, refresh)
         except Exception:
             pass
 
@@ -1680,7 +2128,13 @@ class PriceTrackerApp:
     @staticmethod
     def _update_notes_text(info: UpdateInfo, limit: int = 8) -> str:
         note_items = [str(item).strip() for item in info.notes[:limit] if str(item).strip()]
-        return "\n".join(f"- {item}" for item in note_items) if note_items else "暂无更新说明。"
+        notice = f"- {FREE_SOFTWARE_NOTICE}"
+        if not note_items:
+            return f"暂无更新说明。\n{notice}"
+        lines = [f"- {item}" for item in note_items]
+        if not any(FREE_SOFTWARE_NOTICE in item for item in note_items):
+            lines.append(notice)
+        return "\n".join(lines)
 
     def _show_update_fallback_message(self, info: UpdateInfo) -> None:
         messagebox.showinfo(
@@ -1758,6 +2212,9 @@ class PriceTrackerApp:
 
     def _show_update_available_dialog(self, info: UpdateInfo) -> None:
         manual_url = self._first_manual_update_url(info)
+        theme = self.theme
+        dialog_width = self._scaled(560, 560, 760)
+        content_width = dialog_width - self._scaled(50, 50, 80)
 
         window = Toplevel(self.root)
         self.update_dialog_window = window
@@ -1766,37 +2223,43 @@ class PriceTrackerApp:
         window.title("发现更新")
         window.resizable(False, False)
         window.transient(self.root)
+        window.configure(bg=theme.background)
         self._apply_toplevel_icon(window)
-        body = Frame(window, padx=20, pady=18)
+        body = Frame(window, padx=self._scaled(20, 20, 32), pady=self._scaled(18, 18, 28), bg=theme.background)
         body.pack(fill=BOTH, expand=True)
         Label(
             body,
             text=f"发现新版本 {info.latest_version}",
-            font=("Microsoft YaHei UI", self.config.font_size + 5, "bold"),
+            foreground=theme.text,
+            background=theme.background,
+            font=self._ui_font(5, "bold"),
         ).pack(anchor="w")
         Label(
             body,
             text=f"当前版本：{info.current_version}",
-            foreground="#667085",
+            foreground=theme.muted,
+            background=theme.background,
         ).pack(anchor="w", pady=(6, 0))
         note_text = self._update_notes_text(info)
         Label(
             body,
             text="更新内容：",
-            font=("Microsoft YaHei UI", self.config.font_size, "bold"),
+            foreground=theme.text,
+            background=theme.background,
+            font=self._ui_font(0, "bold"),
         ).pack(anchor="w", pady=(16, 4))
-        notes_box = Frame(body, bg="#f8fafc", padx=12, pady=10)
+        notes_box = Frame(body, bg=theme.surface_alt, padx=12, pady=10)
         notes_box.pack(fill=X, anchor="w")
         Label(
             notes_box,
             text=note_text,
             justify=LEFT,
             anchor="w",
-            bg="#f8fafc",
-            foreground="#344054",
-            wraplength=510,
+            bg=theme.surface_alt,
+            foreground=theme.text,
+            wraplength=content_width,
         ).pack(fill=X, anchor="w")
-        actions = Frame(body)
+        actions = Frame(body, bg=theme.background)
         actions.pack(side="bottom", fill=X, pady=(18, 0))
 
         def manual_download() -> None:
@@ -1826,8 +2289,8 @@ class PriceTrackerApp:
         manual_button.pack(side=RIGHT, padx=(0, 8), ipadx=8)
         window.protocol("WM_DELETE_WINDOW", close_dialog)
         window.update_idletasks()
-        width = max(560, window.winfo_reqwidth())
-        height = max(330, min(560, window.winfo_reqheight() + 12))
+        width = max(dialog_width, window.winfo_reqwidth())
+        height = max(self._scaled(330, 330, 460), min(self._scaled(620, 560, 820), window.winfo_reqheight() + self._scaled(12, 12, 22)))
         self._center_window_on_parent(window, width, height)
         try:
             self.root.deiconify()
@@ -1915,12 +2378,14 @@ class PriceTrackerApp:
             self.root.iconbitmap(str(app_icon_path()))
         except Exception:
             pass
+        self._apply_native_title_bar_theme(self.root)
 
     def _apply_toplevel_icon(self, window: Toplevel) -> None:
         try:
             window.iconbitmap(str(app_icon_path()))
         except Exception:
             pass
+        self._apply_native_title_bar_theme(window)
 
     def _load_app_icon_image(self, size: int = 64) -> Image.Image:
         try:
@@ -2191,7 +2656,12 @@ class PriceTrackerApp:
         process_box.rowconfigure(0, weight=1)
         preview = LabelFrame(process_box, text="截图", padx=10, pady=10)
         preview.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        self.market_exchange_canvas = Canvas(preview, highlightthickness=1, highlightbackground="#d9e2ec", bg="#f8fafc")
+        self.market_exchange_canvas = Canvas(
+            preview,
+            highlightthickness=1,
+            highlightbackground=self.theme.border,
+            bg=self.theme.surface,
+        )
         exchange_x_scroll = ttk.Scrollbar(preview, orient="horizontal", command=self.market_exchange_canvas.xview)
         exchange_y_scroll = ttk.Scrollbar(preview, orient="vertical", command=self.market_exchange_canvas.yview)
         self.market_exchange_canvas.configure(xscrollcommand=exchange_x_scroll.set, yscrollcommand=exchange_y_scroll.set)
@@ -2219,7 +2689,7 @@ class PriceTrackerApp:
                 24,
                 text=f"还没有截图。按 {self.config.hotkeys.realtime_import} 开始框选市场区域。",
                 anchor="nw",
-                fill="#607080",
+                fill=self.theme.muted,
             )
             canvas.configure(scrollregion=(0, 0, 680, 220))
             return
@@ -2229,7 +2699,7 @@ class PriceTrackerApp:
             canvas.create_image(0, 0, image=self.market_exchange_photo, anchor="nw")
             canvas.configure(scrollregion=(0, 0, image.width, image.height))
         except Exception as exc:
-            canvas.create_text(24, 24, text=f"截图预览失败：{exc}", anchor="nw", fill="#b42318")
+            canvas.create_text(24, 24, text=f"截图预览失败：{exc}", anchor="nw", fill=self.theme.danger)
             canvas.configure(scrollregion=(0, 0, 680, 220))
 
     def _update_market_exchange_text(self) -> None:
@@ -2286,6 +2756,55 @@ class PriceTrackerApp:
             pass
         return item_name.strip(), False, False
 
+    @staticmethod
+    def _edit_distance(left: str, right: str) -> int:
+        if left == right:
+            return 0
+        if not left:
+            return len(right)
+        if not right:
+            return len(left)
+        previous = list(range(len(right) + 1))
+        for left_index, left_char in enumerate(left, start=1):
+            current = [left_index]
+            for right_index, right_char in enumerate(right, start=1):
+                cost = 0 if left_char == right_char else 1
+                current.append(
+                    min(
+                        previous[right_index] + 1,
+                        current[right_index - 1] + 1,
+                        previous[right_index - 1] + cost,
+                    )
+                )
+            previous = current
+        return previous[-1]
+
+    def _realtime_import_original_item_name(self) -> str:
+        realtime = getattr(self, "realtime_price_parsed", ParsedRealtimePrice())
+        parsed = getattr(self, "market_exchange_parsed", ParsedMarketExchange())
+        return (
+            str(getattr(realtime, "item_match", "") or "").strip()
+            or str(getattr(realtime, "item_name", "") or "").strip()
+            or str(getattr(parsed, "want_item_match", "") or "").strip()
+            or str(getattr(parsed, "want_item", "") or "").strip()
+            or str(getattr(parsed, "have_item_match", "") or "").strip()
+            or str(getattr(parsed, "have_item", "") or "").strip()
+        )
+
+    def _validate_realtime_item_name_edit(self, item_name: str) -> tuple[bool, str]:
+        original = self._realtime_import_original_item_name()
+        original_key = normalize_name(original)
+        current_key = normalize_name(item_name)
+        if not original_key or not current_key or original_key == current_key:
+            return True, ""
+        changed = self._edit_distance(original_key, current_key)
+        if changed <= len(original_key) / 2:
+            return True, ""
+        return (
+            False,
+            f"物品名修改过多。识别结果是“{original}”，最多只能修正约一半字符，请重新截图或保留主要名称。",
+        )
+
     def save_market_exchange_record(self, show_message: bool = True) -> None:
         if not self.realtime_import_confirmed:
             messagebox.showwarning("请先确认", "请先点击“待确认”，确认识别结果后再提交。")
@@ -2297,6 +2816,10 @@ class PriceTrackerApp:
         currency = realtime.currency.strip()
         if not item_name:
             messagebox.showwarning("缺少物品", "请确认要记录价格的物品。")
+            return
+        valid_name, name_message = self._validate_realtime_item_name_edit(item_name)
+        if not valid_name:
+            messagebox.showwarning("物品名修改过多", name_message)
             return
         amount = float(realtime.amount or 0)
         if amount <= 0:
@@ -2386,7 +2909,7 @@ class PriceTrackerApp:
         ).pack(anchor="w")
         toolbar = Frame(self.content)
         toolbar.pack(fill=X, pady=(12, 10))
-        Button(toolbar, text="截图识别", command=self.start_area_capture).pack(side=LEFT)
+        Button(toolbar, text="截图识别", command=self.start_area_capture, style="Accent.TButton").pack(side=LEFT)
         Label(toolbar, text="框选后会先显示截图，再自动识别内容。").pack(side=LEFT, padx=(12, 0))
         if not self._should_update_ocr_review_page():
             Label(
@@ -2396,7 +2919,7 @@ class PriceTrackerApp:
             ).pack(anchor="w", pady=(8, 0))
             return
         Button(toolbar, text="保存选中", command=self.save_selected_ocr_row).pack(side=RIGHT)
-        Button(toolbar, text="保存全部", command=self.save_all_ocr_rows).pack(side=RIGHT, padx=(0, 8))
+        Button(toolbar, text="保存全部", command=self.save_all_ocr_rows, style="Accent.TButton").pack(side=RIGHT, padx=(0, 8))
         ttk.Checkbutton(
             toolbar,
             text="保存后加入收藏",
@@ -2444,8 +2967,8 @@ class PriceTrackerApp:
             width=18,
         )
         self._enable_combo_full_click(ocr_unit).pack(side=LEFT, padx=(8, 14))
-        Button(edit_row, text="应用修改", command=self.apply_ocr_edit).pack(side=RIGHT)
-        Button(edit_row, text="删除此行", command=self.delete_selected_ocr_row).pack(side=RIGHT, padx=(0, 8))
+        Button(edit_row, text="应用修改", command=self.apply_ocr_edit, style="Accent.TButton").pack(side=RIGHT)
+        Button(edit_row, text="删除此行", command=self.delete_selected_ocr_row, style="Danger.TButton").pack(side=RIGHT, padx=(0, 8))
 
         process_box = LabelFrame(self.content, text="识别过程", padx=12, pady=10)
         process_box.pack(fill=BOTH, expand=True, pady=(14, 0))
@@ -2455,7 +2978,12 @@ class PriceTrackerApp:
 
         preview = Frame(process_box)
         preview.grid(row=0, column=0, sticky="nsew", padx=(0, 12))
-        self.ocr_image_canvas = Canvas(preview, highlightthickness=1, highlightbackground="#d9e2ec", bg="#f8fafc")
+        self.ocr_image_canvas = Canvas(
+            preview,
+            highlightthickness=1,
+            highlightbackground=self.theme.border,
+            bg=self.theme.surface,
+        )
         x_scroll = ttk.Scrollbar(preview, orient="horizontal", command=self.ocr_image_canvas.xview)
         y_scroll_image = ttk.Scrollbar(preview, orient="vertical", command=self.ocr_image_canvas.yview)
         self.ocr_image_canvas.configure(xscrollcommand=x_scroll.set, yscrollcommand=y_scroll_image.set)
@@ -2482,7 +3010,7 @@ class PriceTrackerApp:
             return
         canvas.delete("all")
         if not self.ocr_review_image_path or not self.ocr_review_image_path.is_file():
-            canvas.create_text(24, 24, text="还没有截图。点击“开始框选截图”或按截图快捷键。", anchor="nw", fill="#607080")
+            canvas.create_text(24, 24, text="还没有截图。点击“开始框选截图”或按截图快捷键。", anchor="nw", fill=self.theme.muted)
             canvas.configure(scrollregion=(0, 0, 680, 220))
             return
         try:
@@ -2491,7 +3019,7 @@ class PriceTrackerApp:
             canvas.create_image(0, 0, image=self.ocr_capture_photo, anchor="nw")
             canvas.configure(scrollregion=(0, 0, image.width, image.height))
         except Exception as exc:
-            canvas.create_text(24, 24, text=f"截图预览失败：{exc}", anchor="nw", fill="#b42318")
+            canvas.create_text(24, 24, text=f"截图预览失败：{exc}", anchor="nw", fill=self.theme.danger)
             canvas.configure(scrollregion=(0, 0, 680, 220))
 
     def _update_ocr_process_text(self, placeholder: str = "") -> None:
@@ -2679,7 +3207,7 @@ class PriceTrackerApp:
         self.current_favorites_only = favorites_only
         header = Frame(self.content)
         header.pack(fill=X)
-        Label(header, text=title, font=("Microsoft YaHei UI", self.config.font_size + 8, "bold")).pack(side=LEFT)
+        Label(header, text=title, font=self._ui_font(8, "bold")).pack(side=LEFT)
         self._build_version_status_widget(header).pack(side=RIGHT)
 
         filters = Frame(self.content)
@@ -2722,16 +3250,15 @@ class PriceTrackerApp:
         font_size = Combobox(
             filters,
             textvariable=self.settings_font_var,
-            values=[str(value) for value in range(13, 23)],
+            values=[str(value) for value in range(13, 25)],
             width=6,
             state="readonly",
         )
         font_size.pack(side=LEFT, padx=(8, 0))
-        font_size.bind("<<ComboboxSelected>>", lambda _event: self.save_market_font_size())
+        font_size.bind("<<ComboboxSelected>>", lambda _event: self.save_global_font_size())
 
         columns = ("index", "item", "price", "currency", "trend", "count", "source", "rating", "updated", "favorite")
         table_box = Frame(self.content)
-        table_box.pack(fill=BOTH, expand=True)
         self.market_tree = ttk.Treeview(
             table_box,
             columns=columns,
@@ -2758,25 +3285,25 @@ class PriceTrackerApp:
             "favorite": "收藏",
         }
         widths = {
-            "index": 70,
-            "item": 300,
-            "price": 130,
-            "currency": 90,
-            "trend": 170,
-            "count": 80,
-            "source": 150,
-            "rating": 118,
-            "updated": 180,
-            "favorite": 80,
+            "index": self._scaled(70, 70, 110),
+            "item": self._scaled(300, 300, 460),
+            "price": self._scaled(130, 130, 210),
+            "currency": self._scaled(90, 90, 150),
+            "trend": self._scaled(170, 170, 260),
+            "count": self._scaled(80, 80, 130),
+            "source": self._scaled(150, 150, 240),
+            "rating": self._scaled(118, 118, 190),
+            "updated": self._scaled(180, 180, 280),
+            "favorite": self._scaled(80, 80, 130),
         }
         self.market_headings = headings
         self.market_tree.heading("#0", text=self._market_heading_text("图标", "icon"), command=lambda: self.sort_by_column("icon"))
-        self.market_tree.column("#0", width=58, minwidth=42, anchor="center", stretch=False)
+        self.market_tree.column("#0", width=self._scaled(58, 58, 90), minwidth=self._scaled(42, 42, 70), anchor="center", stretch=False)
         for key in columns:
             self.market_tree.heading(key, text=self._market_heading_text(headings[key], key), command=lambda k=key: self.sort_by_column(k))
-            anchor = "center" if key in {"index", "favorite", "count"} else "w"
+            anchor = "center" if key in {"index", "favorite", "count", "currency", "source", "updated"} else "w"
             self.market_tree.column(key, width=widths[key], anchor=anchor)
-        self.market_tree.tag_configure("pinned", background="#fff7d6")
+        self.market_tree.tag_configure("pinned", background=self.theme.pinned)
         self.market_tree.grid(row=0, column=0, sticky="nsew")
         y_scroll.grid(row=0, column=1, sticky="ns")
         x_scroll.grid(row=1, column=0, sticky="ew")
@@ -2784,34 +3311,74 @@ class PriceTrackerApp:
         table_box.columnconfigure(0, weight=1)
         self.market_tree.bind("<ButtonRelease-1>", self.on_market_click)
         self.market_tree.bind("<Button-3>", self.show_market_context_menu)
-        self.market_tree.bind("<MouseWheel>", self.on_market_tree_motion, add="+")
-        self.market_tree.bind("<Shift-MouseWheel>", self.on_market_tree_motion, add="+")
-        self.market_tree.bind("<Button-4>", self.on_market_tree_motion, add="+")
-        self.market_tree.bind("<Button-5>", self.on_market_tree_motion, add="+")
+        self.market_tree.bind("<MouseWheel>", self.on_market_tree_mousewheel)
+        self.market_tree.bind("<Shift-MouseWheel>", self.on_market_tree_shift_mousewheel)
+        self.market_tree.bind("<Button-4>", self.on_market_tree_mousewheel)
+        self.market_tree.bind("<Button-5>", self.on_market_tree_mousewheel)
         self.market_tree.bind("<Configure>", lambda _event: self._schedule_trend_render())
 
         footer = Frame(self.content)
-        footer.pack(fill=X, pady=(12, 0))
-        Button(footer, text="上一页", command=self.prev_page).pack(side=LEFT)
-        Label(footer, textvariable=self.page_var, width=6, anchor="center").pack(side=LEFT, padx=8)
-        Button(footer, text="下一页", command=self.next_page).pack(side=LEFT)
-        Label(footer, text="每页").pack(side=LEFT, padx=(18, 6))
-        page_size = Combobox(footer, textvariable=self.page_size_var, values=["25", "50", "100", "200"], width=8, state="readonly")
+        footer.pack(fill=X, side=BOTTOM, pady=(self._scaled(10, 8, 18), 0))
+        table_box.pack(fill=BOTH, expand=True, side=TOP)
+        page_controls = Frame(footer)
+        action_controls = Frame(footer)
+        footer.columnconfigure(0, weight=1)
+        footer.columnconfigure(1, weight=0)
+        footer.rowconfigure(0, minsize=self._footer_control_height())
+        footer.rowconfigure(1, minsize=0)
+        page_controls.grid(row=0, column=0, sticky="w")
+        action_controls.grid(row=0, column=1, sticky="e", padx=(self._scaled(10, 8, 18), 0))
+        footer.bind("<Configure>", lambda event: self._arrange_market_footer(event.width, page_controls, action_controls))
+        Button(page_controls, text="上一页", command=self.prev_page, style="Footer.TButton").pack(side=LEFT)
+        Label(page_controls, textvariable=self.page_var, width=6, anchor="center").pack(side=LEFT, padx=self._scaled(8, 8, 14))
+        Button(page_controls, text="下一页", command=self.next_page, style="Footer.TButton").pack(side=LEFT)
+        Label(page_controls, text="每页").pack(side=LEFT, padx=(self._scaled(18, 14, 24), self._scaled(6, 6, 10)))
+        page_size = Combobox(page_controls, textvariable=self.page_size_var, values=["25", "50", "100", "200"], width=8, state="readonly")
         page_size.pack(side=LEFT)
         page_size.bind("<<ComboboxSelected>>", lambda _event: self.save_page_size())
-        Button(footer, text="显示列", command=self.open_column_settings).pack(side=LEFT, padx=(18, 0))
-        Button(footer, text="刷新", command=self.refresh_market_table).pack(side=LEFT, padx=(8, 0))
+        Button(action_controls, text="显示列", command=self.open_column_settings, style="Footer.TButton").pack(side=LEFT)
+        Button(action_controls, text="刷新", command=self.refresh_market_table, style="Footer.TButton").pack(side=LEFT, padx=(self._scaled(8, 8, 12), 0))
+        footer.after_idle(lambda f=footer, p=page_controls, a=action_controls: self._arrange_market_footer(f.winfo_width(), p, a))
         self.refresh_market_table()
+        self._refresh_version_status_widget_later()
         self.root.after(280, self._settle_market_layout)
+
+    def _footer_control_height(self) -> int:
+        size = self._global_font_size()
+        try:
+            line_height = int(tkfont.Font(font=self._ui_font()).metrics("linespace"))
+        except Exception:
+            line_height = int(size * 1.55)
+        return max(self._scaled(50, 46, 96), line_height + self._scaled(22, 18, 34))
+
+    def _arrange_market_footer(self, width: int, page_controls, action_controls) -> None:
+        try:
+            page_controls.update_idletasks()
+            action_controls.update_idletasks()
+            control_height = self._footer_control_height()
+            parent = page_controls.master
+            parent.rowconfigure(0, minsize=control_height)
+            needed = page_controls.winfo_reqwidth() + action_controls.winfo_reqwidth() + self._scaled(18, 14, 28)
+            if width > 0 and needed > width:
+                page_controls.grid_configure(row=0, column=0, columnspan=2, sticky="w")
+                action_controls.grid_configure(row=1, column=0, columnspan=2, sticky="e", padx=0, pady=(self._scaled(8, 6, 12), 0))
+                parent.rowconfigure(1, minsize=control_height)
+            else:
+                page_controls.grid_configure(row=0, column=0, columnspan=1, sticky="w")
+                action_controls.grid_configure(row=0, column=1, columnspan=1, sticky="e", padx=(self._scaled(10, 8, 18), 0), pady=0)
+                parent.rowconfigure(1, minsize=0)
+        except Exception:
+            pass
 
     def show_settings_page(self) -> None:
         self.current_page_name = "settings"
         self._clear_content()
-        holder = Frame(self.content)
+        theme = self.theme
+        holder = Frame(self.content, bg=theme.background)
         holder.pack(fill=BOTH, expand=True)
-        canvas = Canvas(holder, highlightthickness=0)
+        canvas = Canvas(holder, highlightthickness=0, bg=theme.background)
         scrollbar = ttk.Scrollbar(holder, orient="vertical", command=canvas.yview)
-        body = Frame(canvas)
+        body = Frame(canvas, padx=6, pady=4, bg=theme.background)
         window_id = canvas.create_window((0, 0), window=body, anchor="nw")
 
         def update_scrollregion(_event=None) -> None:
@@ -2828,146 +3395,229 @@ class PriceTrackerApp:
         canvas.pack(side=LEFT, fill=BOTH, expand=True)
         scrollbar.pack(side=RIGHT, fill=Y)
 
-        Label(body, text="配置", font=("Microsoft YaHei UI", self.config.font_size + 8, "bold")).pack(anchor="w")
-        grid = Frame(body)
-        grid.pack(fill=X, pady=(18, 0))
+        settings_row_pady = 8
+        settings_label_width = 16
+        section_padx = 18
+        section_pady = 16
+        section_gap = 20
+        label_column_px = self._scaled(168, 156, 230)
+        control_column_px = self._scaled(260, 240, 420)
+        hint_column_px = self._scaled(260, 240, 380)
+        settings_panel_bg = theme.surface
+        settings_panel_border = theme.border
+        settings_rule = theme.border
 
-        left = LabelFrame(grid, text="快捷键", padx=14, pady=12)
-        left.pack(side=LEFT, fill=BOTH, expand=True, padx=(0, 10))
+        def settings_section(parent, title: str, **pack_options) -> Frame:
+            outer = Frame(parent, bg=theme.background)
+            outer.pack(**pack_options)
+            Label(
+                outer,
+                text=title,
+                fg=theme.text,
+                bg=theme.background,
+                font=self._ui_font(1, "bold"),
+                anchor="w",
+            ).pack(anchor="w", pady=(0, self._scaled(8, 7, 12)))
+            Frame(outer, bg=settings_rule, height=1).pack(fill=X, pady=(0, self._scaled(8, 8, 12)))
+            section = Frame(
+                outer,
+                bg=settings_panel_bg,
+                padx=section_padx,
+                pady=section_pady,
+                highlightthickness=1,
+                highlightbackground=settings_panel_border,
+            )
+            section.pack(fill=BOTH, expand=True)
+            return section
+
+        def widget_bg(widget, fallback: str = "") -> str:
+            try:
+                return str(widget.cget("bg"))
+            except Exception:
+                return fallback or settings_panel_bg
+
+        def settings_note(parent, title: str, lines: tuple[str, ...], pady: tuple[int, int] = (8, 0)) -> None:
+            bg = widget_bg(parent)
+            note = Frame(parent, bg=bg)
+            note.pack(fill=X, pady=pady)
+            note.columnconfigure(1, weight=1)
+            Frame(note, bg=theme.border, width=2).grid(row=0, column=0, sticky="ns", padx=(0, self._scaled(10, 8, 16)))
+            Label(
+                note,
+                text=title,
+                fg=theme.text,
+                bg=bg,
+                font=self._ui_font(-4, "bold"),
+                anchor="w",
+            ).grid(row=0, column=1, sticky="nw")
+            text_box = Frame(note, bg=bg)
+            text_box.grid(row=1, column=1, sticky="ew", pady=(self._scaled(3, 2, 5), 0))
+            for line in lines:
+                Label(
+                    text_box,
+                    text=line,
+                    fg=theme.muted,
+                    bg=bg,
+                    font=self._ui_font(-5),
+                    wraplength=self._scaled(760, 640, 980),
+                    justify=LEFT,
+                    anchor="w",
+                ).pack(anchor="w", fill=X, pady=(0, self._scaled(3, 2, 5)))
+
+        def setting_row(parent, label: str, hint: str = "", pady: int | tuple[int, int] = settings_row_pady) -> tuple[Frame, Frame]:
+            bg = widget_bg(parent)
+            row = Frame(parent, bg=bg)
+            row.pack(fill=X, pady=pady)
+            row.columnconfigure(0, minsize=label_column_px)
+            row.columnconfigure(1, weight=1, minsize=control_column_px)
+            row.columnconfigure(2, minsize=hint_column_px)
+            Label(row, text=label, anchor="w", bg=bg, fg=theme.text, font=self._ui_font(-2, "bold")).grid(
+                row=0,
+                column=0,
+                sticky="nw",
+                padx=(0, self._scaled(12, 10, 18)),
+            )
+            control_cell = Frame(row, bg=bg)
+            control_cell.grid(row=0, column=1, sticky="new")
+            if hint:
+                Label(
+                    row,
+                    text=hint,
+                    fg=theme.muted,
+                    bg=bg,
+                    font=self._ui_font(-5),
+                    justify=LEFT,
+                    anchor="w",
+                    wraplength=hint_column_px,
+                ).grid(row=0, column=2, sticky="nw", padx=(self._scaled(14, 12, 22), 0))
+            return row, control_cell
+
+        Label(body, text="配置", fg=theme.text, bg=theme.background, font=self._ui_font(8, "bold")).pack(anchor="w")
+        grid = Frame(body, bg=theme.background)
+        grid.pack(fill=X, pady=(22, 0))
+
+        left = settings_section(grid, "快捷键", side=LEFT, fill=BOTH, expand=True, padx=(0, 12))
+        left_bg = widget_bg(left)
         for label, variable in [
             ("截图识别", StringVar(value=self.config.hotkeys.lookup_hovered)),
             ("聚焦搜索", StringVar(value=self.config.hotkeys.focus_search)),
             ("快速查价", StringVar(value=self.config.hotkeys.quick_price)),
             ("实时价格导入", StringVar(value=self.config.hotkeys.realtime_import)),
         ]:
-            row = Frame(left)
-            row.pack(fill=X, pady=6)
-            Label(row, text=label, width=12, anchor="w").pack(side=LEFT)
+            row = Frame(left, bg=left_bg)
+            row.pack(fill=X, pady=settings_row_pady)
+            row.columnconfigure(1, weight=1)
+            Label(row, text=label, width=12, anchor="w", fg=theme.text, bg=left_bg, font=self._ui_font(-2, "bold")).grid(row=0, column=0, sticky="w", padx=(0, 10))
             button = HotkeyCaptureButton(row, variable)
-            button.pack(side=LEFT, fill=X, expand=True)
+            button.grid(row=0, column=1, sticky="ew")
             if variable.get() == self.config.hotkeys.focus_search:
-                Button(row, text="重置", command=lambda v=variable: v.set("Ctrl+Space")).pack(side=LEFT, padx=(8, 0))
+                Button(row, text="重置", command=lambda v=variable: v.set("Ctrl+Space")).grid(row=0, column=2, sticky="e", padx=(8, 0))
             variable.trace_add("write", lambda *_args, v=variable, n=label: self._save_hotkey_setting(n, v.get()))
 
-        right = LabelFrame(grid, text="显示与截图", padx=14, pady=12)
-        right.pack(side=LEFT, fill=BOTH, expand=True, padx=(10, 0))
+        right = settings_section(grid, "显示与截图", side=LEFT, fill=BOTH, expand=True, padx=(12, 0))
         positive_integer_vcmd = (self.root.register(self._validate_positive_integer_input), "%P")
         nonnegative_integer_vcmd = (self.root.register(self._validate_nonnegative_integer_input), "%P")
-        for label, variable in [
-            ("默认每页数量", self.page_size_var),
-            ("保留截图数量", self.screenshot_retention_var),
+        for label, variable, hint in [
+            ("默认每页数量", self.page_size_var, "列表分页数量。"),
+            ("保留截图数量", self.screenshot_retention_var, "自动清理旧截图。"),
         ]:
-            row = Frame(right)
-            row.pack(fill=X, pady=6)
-            Label(row, text=label, width=14, anchor="w").pack(side=LEFT)
-            entry = Entry(row, textvariable=variable, validate="key", validatecommand=positive_integer_vcmd)
+            _row, cell = setting_row(right, label, hint)
+            entry = Entry(cell, textvariable=variable, validate="key", validatecommand=positive_integer_vcmd)
             entry.pack(side=LEFT, fill=X, expand=True)
             entry.bind("<FocusOut>", lambda _event: self.save_inline_settings())
             entry.bind("<Return>", lambda _event: self.save_inline_settings())
-        row = Frame(right)
-        row.pack(fill=X, pady=6)
-        Label(row, text="实时价格最低赞", width=14, anchor="w").pack(side=LEFT)
-        entry = Entry(row, textvariable=self.realtime_min_upvotes_var, validate="key", validatecommand=nonnegative_integer_vcmd)
+        _row, cell = setting_row(right, "实时价格最低赞", "低于此数不采用。")
+        entry = Entry(cell, textvariable=self.realtime_min_upvotes_var, validate="key", validatecommand=nonnegative_integer_vcmd)
         entry.pack(side=LEFT, fill=X, expand=True)
         entry.bind("<FocusOut>", lambda _event: self.save_inline_settings())
         entry.bind("<Return>", lambda _event: self.save_inline_settings())
-        row = Frame(right)
-        row.pack(fill=X, pady=6)
-        Label(row, text="默认显示单位", width=14, anchor="w").pack(side=LEFT)
-        unit = Combobox(row, textvariable=self.display_currency_var, values=["神圣石", "崇高石", "混沌石"], state="readonly")
+        _row, cell = setting_row(right, "默认显示单位", "查价默认单位。")
+        unit = Combobox(cell, textvariable=self.display_currency_var, values=["神圣石", "崇高石", "混沌石"], state="readonly")
         unit.pack(side=LEFT, fill=X, expand=True)
         unit.bind("<<ComboboxSelected>>", lambda _event: self.save_display_currency())
-        row = Frame(right)
-        row.pack(fill=X, pady=6)
-        Label(row, text="界面皮肤", width=14, anchor="w").pack(side=LEFT)
-        theme_combo = Combobox(row, textvariable=self.ui_theme_var, values=list(THEME_LABELS), state="readonly")
+        _row, cell = setting_row(right, "界面皮肤", "切换配色。")
+        theme_combo = Combobox(cell, textvariable=self.ui_theme_var, values=list(THEME_LABELS), state="readonly")
         theme_combo.pack(side=LEFT, fill=X, expand=True)
         theme_combo.bind("<<ComboboxSelected>>", lambda _event: self.save_ui_theme_setting())
-        row = Frame(right)
-        row.pack(fill=X, pady=6)
-        Label(row, text="价格小数位数", width=14, anchor="w").pack(side=LEFT)
+        _row, cell = setting_row(right, "全局字体大小", "调整整体字号。")
+        global_font = Combobox(
+            cell,
+            textvariable=self.settings_font_var,
+            values=[str(value) for value in range(13, 25)],
+            state="readonly",
+        )
+        global_font.pack(side=LEFT, fill=X, expand=True)
+        global_font.bind("<<ComboboxSelected>>", lambda _event: self.save_global_font_size())
+        _row, cell = setting_row(right, "价格小数位数", "价格显示精度。")
         decimals = Combobox(
-            row,
+            cell,
             textvariable=self.price_decimal_var,
             values=[str(value) for value in range(0, 9)],
             state="readonly",
         )
         decimals.pack(side=LEFT, fill=X, expand=True)
         decimals.bind("<<ComboboxSelected>>", lambda _event: self.save_inline_settings())
-        row = Frame(right)
-        row.pack(fill=X, pady=6)
-        Label(row, text="焦点搜索外观", width=14, anchor="w").pack(side=LEFT)
-        shape = Combobox(row, textvariable=self.focus_search_shape_var, values=["圆角", "直角"], state="readonly")
+        _row, cell = setting_row(right, "焦点搜索外观", "搜索浮窗边角。")
+        shape = Combobox(cell, textvariable=self.focus_search_shape_var, values=["圆角", "直角"], state="readonly")
         shape.pack(side=LEFT, fill=X, expand=True)
         shape.bind("<<ComboboxSelected>>", lambda _event: self.save_focus_search_settings())
-        row = Frame(right)
-        row.pack(fill=X, pady=6)
-        Label(row, text="焦点搜索条数", width=14, anchor="w").pack(side=LEFT)
-        limit = Combobox(row, textvariable=self.focus_search_limit_var, values=["3", "5", "8", "10"], state="readonly")
+        _row, cell = setting_row(right, "焦点搜索条数", "候选结果上限。")
+        limit = Combobox(cell, textvariable=self.focus_search_limit_var, values=["3", "5", "8", "10"], state="readonly")
         limit.pack(side=LEFT, fill=X, expand=True)
         limit.bind("<<ComboboxSelected>>", lambda _event: self.save_focus_search_settings())
 
-        window_box = LabelFrame(body, text="窗口行为", padx=14, pady=12)
-        window_box.pack(fill=X, pady=(16, 0))
-        row = Frame(window_box)
-        row.pack(fill=X, pady=6)
-        Label(row, text="最小化时", width=14, anchor="w").pack(side=LEFT)
+        window_box = settings_section(body, "窗口行为", fill=X, pady=(section_gap, 0))
+        _row, cell = setting_row(window_box, "最小化时", "最小化按钮动作。")
         minimize = Combobox(
-            row,
+            cell,
             textvariable=self.minimize_action_var,
             values=["首次询问", "保留在任务栏", "右下角小图标"],
             state="readonly",
         )
         minimize.pack(side=LEFT, fill=X, expand=True)
         minimize.bind("<<ComboboxSelected>>", lambda _event: self.save_window_behavior_settings())
-        row = Frame(window_box)
-        row.pack(fill=X, pady=6)
-        Label(row, text="关闭窗口时", width=14, anchor="w").pack(side=LEFT)
+        _row, cell = setting_row(window_box, "关闭窗口时", "关闭按钮动作。")
         close = Combobox(
-            row,
+            cell,
             textvariable=self.close_action_var,
             values=["首次询问", "退出软件", "右下角小图标"],
             state="readonly",
         )
         close.pack(side=LEFT, fill=X, expand=True)
         close.bind("<<ComboboxSelected>>", lambda _event: self.save_window_behavior_settings())
-        Label(
+        settings_note(
             window_box,
-            text="保留在任务栏：普通最小化。右下角小图标：隐藏窗口并继续后台运行。退出软件：关闭程序并停止快捷键。",
-            foreground="#607080",
-            wraplength=860,
-            justify=LEFT,
-        ).pack(anchor="w", pady=(8, 0))
+            "窗口关闭和最小化说明",
+            (
+                "托盘模式会隐藏主窗口，快捷键继续生效。",
+            ),
+            pady=(10, 0),
+        )
 
-        ocr_box = LabelFrame(body, text="截图识别功能", padx=14, pady=12)
-        ocr_box.pack(fill=X, pady=(16, 0))
-        Label(
+        ocr_box = settings_section(body, "截图识别功能", fill=X, pady=(section_gap, 0))
+        settings_note(
             ocr_box,
-            text="截图识别能力已随程序提供。首次使用时需要准备一下，之后会更快。",
-            foreground="#607080",
-            wraplength=760,
-        ).pack(anchor="w")
-        ocr_row = Frame(ocr_box)
-        ocr_row.pack(fill=X, pady=(10, 0))
-        Label(ocr_row, text="准备状态", width=10, anchor="w").pack(side=LEFT)
-        Entry(ocr_row, textvariable=self.ocr_status_var, state="readonly").pack(side=LEFT, fill=X, expand=True)
-        Button(ocr_row, text="提前准备", command=self.prepare_ocr_runtime).pack(side=LEFT, padx=(8, 0))
-        row = Frame(ocr_box)
-        row.pack(fill=X, pady=(10, 0))
-        Label(row, text="OCR推理后端", width=14, anchor="w").pack(side=LEFT)
+            "截图识别说明",
+            (
+                "首次加载模型需要等待；提前准备可减少首次识别延迟。",
+            ),
+            pady=(0, 12),
+        )
+        _row, cell = setting_row(ocr_box, "准备状态", "手动预加载模型。", pady=(12, 0))
+        Entry(cell, textvariable=self.ocr_status_var, state="readonly").pack(side=LEFT, fill=X, expand=True)
+        Button(cell, text="提前准备", command=self.prepare_ocr_runtime, style="Ghost.TButton").pack(side=LEFT, padx=(8, 0))
+        _row, cell = setting_row(ocr_box, "OCR推理后端", self._ocr_provider_status_text(), pady=(12, 0))
         provider = Combobox(
-            row,
+            cell,
             textvariable=self.ocr_provider_var,
             values=["GPU DirectML", "GPU CUDA", "自动", "CPU"],
             state="readonly",
         )
         provider.pack(side=LEFT, fill=X, expand=True)
         provider.bind("<<ComboboxSelected>>", lambda _event: self.save_ocr_performance_settings())
-        row = Frame(ocr_box)
-        row.pack(fill=X, pady=6)
-        Label(row, text="OCR CPU线程", width=14, anchor="w").pack(side=LEFT)
+        _row, cell = setting_row(ocr_box, "OCR CPU线程", "自动推荐可用线程。")
         threads = Combobox(
-            row,
+            cell,
             textvariable=self.ocr_cpu_threads_var,
             values=self._ocr_thread_choices(),
             state="readonly",
@@ -2976,18 +3626,6 @@ class PriceTrackerApp:
         threads.bind("<<ComboboxSelected>>", lambda _event: self.save_ocr_performance_settings())
         threads.bind("<FocusOut>", lambda _event: self.save_ocr_performance_settings())
         threads.bind("<Return>", lambda _event: self.save_ocr_performance_settings())
-        Label(
-            ocr_box,
-            text=self._ocr_provider_status_text(),
-            foreground="#40566f",
-            wraplength=760,
-        ).pack(anchor="w", pady=(2, 0))
-        Label(
-            ocr_box,
-            text=f"检测到 {os.cpu_count() or 1} 个逻辑核心",
-            foreground="#607080",
-            wraplength=760,
-        ).pack(anchor="w", pady=(2, 0))
         ttk.Checkbutton(
             ocr_box,
             text="识别时降低本程序优先级，减少游戏卡顿",
@@ -2995,6 +3633,7 @@ class PriceTrackerApp:
             onvalue="1",
             offvalue="0",
             command=self.save_ocr_performance_settings,
+            style="Settings.TCheckbutton",
         ).pack(anchor="w", pady=(8, 0))
         ttk.Checkbutton(
             ocr_box,
@@ -3003,6 +3642,7 @@ class PriceTrackerApp:
             onvalue="1",
             offvalue="0",
             command=self.save_preload_ocr_setting,
+            style="Settings.TCheckbutton",
         ).pack(anchor="w", pady=(10, 0))
         ttk.Checkbutton(
             ocr_box,
@@ -3011,36 +3651,36 @@ class PriceTrackerApp:
             onvalue="1",
             offvalue="0",
             command=self.save_ocr_details_setting,
+            style="Settings.TCheckbutton",
         ).pack(anchor="w", pady=(8, 0))
 
-        update_box = LabelFrame(body, text="软件更新", padx=14, pady=12)
-        update_box.pack(fill=X, pady=(16, 0))
-        Label(
+        update_box = settings_section(body, "软件更新", fill=X, pady=(section_gap, 0))
+        settings_note(
             update_box,
-            text="更新地址（按顺序尝试；Gitee 固定用于版本检查，GitHub 可作为备用源）",
-            foreground="#667085",
-            justify=LEFT,
-            wraplength=760,
-        ).pack(anchor="w", fill=X)
-        source_row = Frame(update_box)
-        source_row.pack(fill=X, pady=(6, 0))
-        source_list = Listbox(source_row, height=4, exportselection=False)
+            "更新地址",
+            ("按顺序检查；Gitee 内置，GitHub 备用。",),
+            pady=(0, 12),
+        )
+        update_bg = widget_bg(update_box)
+        source_row = Frame(update_box, bg=update_bg)
+        source_row.pack(fill=X, pady=(10, 0))
+        source_list = Listbox(source_row, height=5, exportselection=False)
         source_list.pack(side=LEFT, fill=BOTH, expand=True)
         source_scroll = ttk.Scrollbar(source_row, orient="vertical", command=source_list.yview)
         source_scroll.pack(side=LEFT, fill=Y)
         source_list.configure(yscrollcommand=source_scroll.set)
         source_list.bind("<<ListboxSelect>>", self._on_update_source_selected)
         self.update_sources_listbox = source_list
-        order_buttons = Frame(source_row)
+        order_buttons = Frame(source_row, bg=update_bg)
         order_buttons.pack(side=LEFT, fill=Y, padx=(8, 0))
-        Button(order_buttons, text="上移", command=self.move_update_source_up).pack(fill=X)
-        Button(order_buttons, text="下移", command=self.move_update_source_down).pack(fill=X, pady=(6, 0))
+        Button(order_buttons, text="上移", command=self.move_update_source_up, style="Ghost.TButton").pack(fill=X)
+        Button(order_buttons, text="下移", command=self.move_update_source_down, style="Ghost.TButton").pack(fill=X, pady=(6, 0))
         self._load_update_source_list()
-        edit_row = Frame(update_box)
-        edit_row.pack(fill=X, pady=(8, 0))
+        edit_row = Frame(update_box, bg=update_bg)
+        edit_row.pack(fill=X, pady=(10, 0))
         Entry(edit_row, textvariable=self.update_source_var).pack(side=LEFT, fill=X, expand=True)
-        Button(edit_row, text="添加", command=self.add_update_source).pack(side=LEFT, padx=(8, 0))
-        Button(edit_row, text="删除", command=self.remove_update_source).pack(side=LEFT, padx=(6, 0))
+        Button(edit_row, text="添加", command=self.add_update_source, style="Ghost.TButton").pack(side=LEFT, padx=(8, 0))
+        Button(edit_row, text="删除", command=self.remove_update_source, style="Ghost.TButton").pack(side=LEFT, padx=(6, 0))
         ttk.Checkbutton(
             update_box,
             text="启动后自动检查更新",
@@ -3048,54 +3688,64 @@ class PriceTrackerApp:
             onvalue="1",
             offvalue="0",
             command=self.save_inline_settings,
-        ).pack(anchor="w")
-        update_actions = Frame(update_box)
-        update_actions.pack(anchor="w", pady=(8, 0))
-        Button(update_actions, text="检查更新", command=self.check_for_updates).pack(side=LEFT)
+            style="Settings.TCheckbutton",
+        ).pack(anchor="w", pady=(8, 0))
+        update_actions = Frame(update_box, bg=update_bg)
+        update_actions.pack(anchor="w", pady=(10, 0))
+        Button(update_actions, text="检查更新", command=self.check_for_updates, style="Accent.TButton").pack(side=LEFT)
         self.manual_download_button = Button(
             update_actions,
             text="手动下载",
             command=self.open_latest_manual_download,
+            style="Ghost.TButton",
         )
         self.manual_download_button.pack(side=LEFT, padx=(8, 0))
         self._set_manual_download_button_enabled(False)
 
-        realtime_sync_box = LabelFrame(body, text="实时价格同步", padx=14, pady=12)
-        realtime_sync_box.pack(fill=X, pady=(16, 0))
-        Label(
+        realtime_sync_box = settings_section(body, "实时价格同步", fill=X, pady=(section_gap, 0))
+        settings_note(
             realtime_sync_box,
-            text="普通用户只连接价格共享服务，Redis 密钥只保存在服务器端。",
-            foreground="#607080",
-            wraplength=760,
-        ).pack(anchor="w")
-        row = Frame(realtime_sync_box)
+            "同步说明",
+            ("同步共享价格到本地。",),
+            pady=(0, 12),
+        )
+        _row, cell = setting_row(realtime_sync_box, "共享服务地址", "提交与同步地址。")
+        Entry(cell, textvariable=self.share_service_url_var).pack(side=LEFT, fill=X, expand=True)
+        sync_bg = widget_bg(realtime_sync_box)
+        row = Frame(realtime_sync_box, bg=sync_bg)
         row.pack(fill=X, pady=(10, 0))
-        Label(row, text="共享服务地址", width=14, anchor="w").pack(side=LEFT)
-        Entry(row, textvariable=self.share_service_url_var).pack(side=LEFT, fill=X, expand=True)
-        row = Frame(realtime_sync_box)
-        row.pack(fill=X, pady=(8, 0))
-        Label(row, textvariable=self.redis_sync_status_var, foreground="#40566f").pack(side=LEFT, fill=X, expand=True)
-        Button(row, text="保存", command=self.save_realtime_sync_settings).pack(side=RIGHT)
-        Button(row, text="测试连接", command=self.test_price_share_service).pack(side=RIGHT, padx=(0, 8))
+        Label(row, textvariable=self.redis_sync_status_var, fg=theme.muted, bg=sync_bg).pack(side=LEFT, fill=X, expand=True)
+        Button(row, text="保存", command=self.save_realtime_sync_settings, style="Accent.TButton").pack(side=RIGHT)
+        Button(row, text="测试连接", command=self.test_price_share_service, style="Ghost.TButton").pack(side=RIGHT, padx=(0, 8))
 
-        danger_box = LabelFrame(body, text="数据", padx=14, pady=12)
-        danger_box.pack(fill=X, pady=(16, 0))
+        danger_box = settings_section(body, "数据", fill=X, pady=(section_gap, 0))
+        data_bg = widget_bg(danger_box)
+        data_row = Frame(danger_box, bg=data_bg)
+        data_row.pack(fill=X)
         Label(
-            danger_box,
-            text="清空已记录数据会删除本地所有价格记录、收藏和置顶，不影响配置。",
-            foreground="#9a3412",
-            wraplength=760,
+            data_row,
+            text="清空价格记录、收藏和置顶；配置不受影响。",
+            fg=theme.warning,
+            bg=data_bg,
+            wraplength=self._scaled(760, 640, 980),
+            justify=LEFT,
         ).pack(side=LEFT, fill=X, expand=True)
-        Button(danger_box, text="清空已记录数据", command=self.clear_recorded_data).pack(side=RIGHT, padx=(12, 0))
-        Button(danger_box, text="打开缓存位置", command=self.open_cache_directory).pack(side=RIGHT, padx=(12, 0))
+        Button(data_row, text="清空已记录数据", command=self.clear_recorded_data, style="Danger.TButton").pack(side=RIGHT, padx=(12, 0))
+        Button(data_row, text="打开缓存位置", command=self.open_cache_directory, style="Ghost.TButton").pack(side=RIGHT, padx=(12, 0))
 
-        Button(body, text="退出软件", command=self.exit_app).pack(anchor="w", pady=(16, 0))
-        Label(
-            body,
-            text="© 2026 大狗狗丶丶。版权所有，保留所有权利。",
-            foreground="#8a97a6",
-            wraplength=760,
-        ).pack(anchor="w", pady=(16, 18))
+        Button(body, text="退出软件", command=self.exit_app, style="Danger.TButton").pack(anchor="w", pady=(section_gap, 0))
+        legal_box = Frame(body, bg=theme.background)
+        legal_box.pack(fill=X, pady=(18, 18))
+        settings_note(
+            legal_box,
+            "版权与许可",
+            (
+                "© 2026 大狗狗丶。源代码按 GNU GPL-3.0-only 发布。",
+                "品牌资源、官方服务和商业授权另行保留。",
+                "软件按现状提供；与游戏官方无关。",
+            ),
+            pady=(0, 0),
+        )
 
         def wheel_handler(event) -> None:
             canvas.yview_scroll(int(-1 * (event.delta / 120)), "units")
@@ -3126,7 +3776,7 @@ class PriceTrackerApp:
         listbox.delete(0, END)
         listbox.insert(END, GITEE_UPDATE_MANIFEST_URL)
         try:
-            listbox.itemconfig(0, foreground="#667085")
+            listbox.itemconfig(0, foreground=self.theme.muted)
         except Exception:
             pass
         sources = self._split_update_sources(self.settings_manifest_var.get())
@@ -3279,7 +3929,7 @@ class PriceTrackerApp:
 
     def _share_sync_status_text(self, credentials: RedisCredentials) -> str:
         if str(getattr(self.config, "price_share_service_url", "") or "").strip():
-            return "已使用价格共享服务，Redis 密钥不会保存在本机。"
+            return "已使用价格共享服务；本机只保存服务地址。"
         if credentials.has_write():
             return "已配置本机私有同步，可上传并同步实时价格。"
         if credentials.has_read():
@@ -3478,15 +4128,37 @@ class PriceTrackerApp:
         self.status_var.set("已清空本地价格记录。")
         messagebox.showinfo("清空已记录数据", "已清空成功！")
 
-    def save_market_font_size(self) -> None:
+    def save_global_font_size(self) -> None:
         try:
-            self.config.font_size = max(13, min(22, int(self.settings_font_var.get())))
+            self.config.font_size = max(13, min(24, int(self.settings_font_var.get())))
         except ValueError:
             return
+        self.config.font_size_configured = True
+        self.settings_font_var.set(str(self.config.font_size))
         save_config(self.config)
         self._configure_style()
-        self.status_var.set(f"列表字体已调整为 {self.config.font_size}。")
-        self.show_favorites_page() if getattr(self, "current_favorites_only", False) else self.show_market_page()
+        self._apply_root_size_for_font()
+        self._apply_theme_to_widget_tree(self.root)
+        self.status_var.set(f"全局字体大小已调整为 {self.config.font_size}。")
+        self._refresh_current_page_after_style_change()
+
+    def save_market_font_size(self) -> None:
+        self.save_global_font_size()
+
+    def _refresh_current_page_after_style_change(self) -> None:
+        page = getattr(self, "current_page_name", "")
+        if page == "settings":
+            self.show_settings_page()
+        elif page == "favorites":
+            self.show_favorites_page()
+        elif page == "manual":
+            self.show_manual_record_page()
+        elif page == "market_exchange":
+            self.show_market_exchange_page()
+        elif page == "ocr":
+            self.show_ocr_review_page()
+        else:
+            self.show_market_page()
 
     def _market_heading_text(self, label: str, key: str) -> str:
         db_column = {
@@ -3623,7 +4295,7 @@ class PriceTrackerApp:
         target_currency = self.display_currency_var.get() or self.config.display_currency
         rate = self.db.get_exalted_per_divine()
         chaos_per_divine = self.db.get_chaos_per_divine()
-        db_sort_columns = {"latest_at", "name", "count", "source", "favorite", "price", "rating", "icon", "trend", "currency"}
+        db_sort_columns = {"latest_at", "name", "count", "source", "favorite", "price", "rating", "icon", "currency"}
         if self.sort_column in db_sort_columns:
             rows = self.db.get_market_rows(
                 query=self.search_var.get(),
@@ -3688,11 +4360,13 @@ class PriceTrackerApp:
                 ),
                 tags=("pinned",) if row.pinned else (),
             )
+            history_records = page_histories.get(row.item_id, [])
             history = [
                 convert_amount(record.amount, record.currency, row.latest_currency, rate, chaos_per_divine)
-                for record in page_histories.get(row.item_id, [])
+                for record in history_records
             ]
-            trend_values = history if len(history) >= 3 else []
+            recent_values = recent_trend_values(history_records, history)
+            trend_values = recent_values if len(recent_values) >= 3 else []
             self.trend_data[row.item_name] = (trend_values, row.trend_percent)
             self.market_row_data[row.item_name] = row
         self._apply_visible_columns()
@@ -3725,8 +4399,27 @@ class PriceTrackerApp:
             return bundled
         return Path(__file__).resolve().parents[2] / "static" / name
 
-    def _rating_icon_image(self, name: str, size: int = 22, disabled: bool = False, light: bool = False):
-        key = f"{name}:{size}:{disabled}:{light}"
+    @staticmethod
+    def _hex_rgb(color: str, fallback: tuple[int, int, int] = (17, 24, 39)) -> tuple[int, int, int]:
+        value = str(color or "").strip().lstrip("#")
+        if len(value) == 3:
+            value = "".join(ch * 2 for ch in value)
+        try:
+            return tuple(int(value[i : i + 2], 16) for i in (0, 2, 4)) if len(value) == 6 else fallback
+        except Exception:
+            return fallback
+
+    def _rating_icon_image(
+        self,
+        name: str,
+        size: int = 22,
+        disabled: bool = False,
+        tint_color: str = "",
+        background_color: str = "",
+    ):
+        tint_color = str(tint_color or "#111827").strip()
+        background_color = str(background_color or "").strip()
+        key = f"{name}:{size}:{disabled}:{tint_color}:{background_color}"
         if key in self.rating_icon_images:
             return self.rating_icon_images[key]
         path = self._static_asset_path(name)
@@ -3735,14 +4428,18 @@ class PriceTrackerApp:
         try:
             image = Image.open(path).convert("RGBA")
             image.thumbnail((size, size), Image.LANCZOS)
-            if light:
-                alpha = image.getchannel("A")
-                tint = Image.new("RGBA", image.size, (248, 250, 252, 255))
-                tint.putalpha(alpha)
-                image = tint
+            alpha = image.getchannel("A")
             if disabled:
-                alpha = image.getchannel("A").point(lambda value: int(value * 0.42))
-                image.putalpha(alpha)
+                alpha = alpha.point(lambda value: int(value * 0.68))
+            rgb = self._hex_rgb(tint_color)
+            tint = Image.new("RGBA", image.size, (*rgb, 255))
+            tint.putalpha(alpha)
+            if background_color:
+                bg_rgb = self._hex_rgb(background_color, rgb)
+                image = Image.new("RGBA", image.size, (*bg_rgb, 255))
+                image.alpha_composite(tint)
+            else:
+                image = tint
             photo = ImageTk.PhotoImage(image)
             self.rating_icon_images[key] = photo
             return photo
@@ -3774,6 +4471,80 @@ class PriceTrackerApp:
     def _rating_label_text(vote_text: str, has_image: bool, force_text_icon: bool = False) -> str:
         return f"👍 {vote_text}" if force_text_icon or not has_image else f" {vote_text}"
 
+    def _rating_slot_width(self, size: int | None = None) -> int:
+        base = max(18, int(size or self._scaled(22, 20, 30)))
+        return max(self._scaled(58, 52, 96), base * 2 + self._scaled(18, 16, 32))
+
+    def _rating_slot_height(self, size: int | None = None) -> int:
+        base = max(18, int(size or self._scaled(22, 20, 30)))
+        return max(self._scaled(30, 28, 48), base + self._scaled(10, 8, 18))
+
+    def _overlay_price_color(self) -> str:
+        theme = getattr(self, "theme", theme_for_key("default"))
+        return theme.overlay_accent
+
+    def _overlay_trend_color(self, trend: str) -> str:
+        theme = getattr(self, "theme", theme_for_key("default"))
+        text = str(trend or "").strip()
+        if text.startswith("+"):
+            return theme.success
+        if text.startswith("-"):
+            return theme.danger
+        return theme.overlay_muted
+
+    def _overlay_meta_color(self) -> str:
+        theme = getattr(self, "theme", theme_for_key("default"))
+        if theme.key == "poe2":
+            return "#a88f68"
+        if theme.is_dark:
+            return "#8fa1b6"
+        return "#64748b"
+
+    def _rating_colors(self, bg: str, selected: bool = False) -> tuple[str, str]:
+        if selected:
+            return ("#f2c94c" if self._color_is_dark(bg) else "#a16207"), bg
+        return ("#ffffff" if self._color_is_dark(bg) else "#111827"), bg
+
+    def _rating_text_font(self, size: int) -> tuple[str, int] | tuple[str, int, str]:
+        return self._ui_font(-5 if size <= self._scaled(22, 20, 30) else -4, "bold")
+
+    def _rating_button_width(self, size: int, upvotes: int = 0) -> int:
+        vote_text = self._format_upvotes(upvotes)
+        try:
+            font = tkfont.Font(font=self._rating_text_font(size))
+            text_width = font.measure(vote_text)
+        except Exception:
+            text_width = max(10, len(vote_text) * max(7, self._global_font_size() // 2))
+        return max(size + text_width + self._scaled(12, 10, 20), size + self._scaled(22, 20, 34))
+
+    def _overlay_price_label(self, parent, text: str, bg: str, font_delta: int, **kwargs):
+        label = Label(
+            parent,
+            text=text,
+            fg=self._overlay_price_color(),
+            bg=bg,
+            font=self._ui_font(font_delta, "bold"),
+            **kwargs,
+        )
+        label.configure(foreground=self._overlay_price_color())
+        label._preserve_theme_fg = True  # type: ignore[attr-defined]
+        label._overlay_value_label = "price"  # type: ignore[attr-defined]
+        return label
+
+    def _overlay_trend_label(self, parent, trend: str, bg: str, font_delta: int, **kwargs):
+        label = Label(
+            parent,
+            text=f"趋势 {trend or '暂无'}",
+            fg=self._overlay_trend_color(trend),
+            bg=bg,
+            font=self._ui_font(font_delta, "bold" if font_delta >= -1 else "normal"),
+            **kwargs,
+        )
+        label.configure(foreground=self._overlay_trend_color(trend))
+        label._preserve_theme_fg = True  # type: ignore[attr-defined]
+        label._overlay_value_label = "trend"  # type: ignore[attr-defined]
+        return label
+
     def _rating_button(
         self,
         parent,
@@ -3786,31 +4557,72 @@ class PriceTrackerApp:
         icon_name = "rating.png"
         voted = record_id in self.realtime_session_votes
         selected = self.realtime_session_votes.get(record_id) == 1
-        theme = getattr(self, "theme", theme_for_key("default"))
-        light = bool(getattr(theme, "is_dark", False)) or bg.lower() in {"#10151d", "#000000", theme.overlay_surface.lower()}
-        image = self._rating_icon_image(icon_name, size=size, disabled=voted and not selected, light=light)
+        fg, button_bg = self._rating_colors(bg, selected)
+        image = self._rating_icon_image(icon_name, size=size, disabled=voted and not selected, tint_color=fg)
         vote_text = self._format_upvotes(upvotes)
         has_image = bool(image)
-        label_text = self._rating_label_text(vote_text, has_image, force_text_icon=force_text_icon)
-        label = Label(
+        if force_text_icon or not has_image:
+            label_text = self._rating_label_text(vote_text, has_image, force_text_icon=force_text_icon)
+            label = Label(
+                parent,
+                text=label_text,
+                fg=fg,
+                bg=button_bg,
+                relief="flat",
+                bd=0,
+                highlightthickness=0,
+                padx=0,
+                pady=0,
+                cursor="" if voted else "hand2",
+                font=self._rating_text_font(size),
+            )
+            label.configure(foreground=fg)
+            label._rating_button = True  # type: ignore[attr-defined]
+            if not voted:
+                label.bind("<Button-1>", lambda event, rid=record_id: self._vote_realtime_record(event, rid))
+            return label
+        label = Frame(
             parent,
-            image=image,
-            text=label_text,
-            compound=LEFT,
-            fg=theme.primary if not light else theme.overlay_text,
-            bg=theme.selection_bg if selected else bg,
-            relief="solid" if selected else "flat",
-            bd=1 if selected else 0,
-            padx=5,
-            pady=2,
+            bg=button_bg,
+            bd=0,
+            highlightthickness=0,
             cursor="" if voted else "hand2",
-            font=("Microsoft YaHei UI", max(9, int(size * 0.55)), "bold"),
         )
-        label.configure(text=label_text)
+        icon_label = Label(
+            label,
+            image=image,
+            bg=button_bg,
+            bd=0,
+            highlightthickness=0,
+            padx=0,
+            pady=0,
+            cursor="" if voted else "hand2",
+        )
+        icon_label.pack(side=LEFT)
+        text_label = Label(
+            label,
+            text=vote_text,
+            fg=fg,
+            bg=button_bg,
+            bd=0,
+            highlightthickness=0,
+            padx=self._scaled(3, 2, 5),
+            pady=0,
+            cursor="" if voted else "hand2",
+            font=self._rating_text_font(size),
+        )
+        text_label.configure(foreground=fg)
+        text_label.pack(side=LEFT)
         label.image = image  # type: ignore[attr-defined]
         label._rating_button = True  # type: ignore[attr-defined]
+        icon_label.image = image  # type: ignore[attr-defined]
+        icon_label._rating_button = True  # type: ignore[attr-defined]
+        text_label._rating_button = True  # type: ignore[attr-defined]
         if not voted:
-            label.bind("<Button-1>", lambda event, rid=record_id: self._vote_realtime_record(event, rid))
+            handler = lambda event, rid=record_id: self._vote_realtime_record(event, rid)
+            label.bind("<Button-1>", handler)
+            icon_label.bind("<Button-1>", handler)
+            text_label.bind("<Button-1>", handler)
         return label
 
     def _render_rating_controls(
@@ -3821,12 +4633,30 @@ class PriceTrackerApp:
         bg: str,
         size: int = 22,
         upvotes: int = 0,
+        reserve_space: bool = False,
+        force_text_icon: bool = False,
+        inline: bool = True,
     ) -> bool:
-        if not self._rating_available(record_id, source):
+        if not self._rating_available(record_id, source) and not reserve_space:
             return False
         holder = Frame(parent, bg=bg)
-        holder.pack(side=RIGHT, padx=(10, 0))
-        self._rating_button(holder, record_id, bg, size=size, upvotes=upvotes).pack(side=LEFT)
+        if inline:
+            holder.pack(side=RIGHT, padx=(self._scaled(10, 8, 16), 0))
+        else:
+            holder.pack(anchor="e", pady=(self._scaled(3, 2, 6), 0))
+        if reserve_space:
+            holder.configure(width=self._rating_slot_width(size), height=self._rating_slot_height(size))
+            holder.pack_propagate(False)
+        if not self._rating_available(record_id, source):
+            return False
+        self._rating_button(
+            holder,
+            record_id,
+            bg,
+            size=size,
+            upvotes=upvotes,
+            force_text_icon=force_text_icon,
+        ).pack(side=LEFT)
         return True
 
     def _render_rating_button_inline(
@@ -3851,6 +4681,184 @@ class PriceTrackerApp:
         ).pack(side=LEFT)
         return True
 
+    def _overlay_result_layout_metrics(self, content_width: int, rating_size: int, price_kind: str = "normal") -> dict[str, int]:
+        rating_width = self._rating_slot_width(rating_size)
+        index_width = self._scaled(30, 28, 44)
+        gap = self._scaled(8, 7, 13)
+        if price_kind == "wide":
+            min_price = self._scaled(150, 140, 300)
+            target_price = int(content_width * 0.28)
+            max_price = self._scaled(320, 280, 500)
+            min_name = self._scaled(190, 150, 410)
+        else:
+            min_price = self._scaled(138, 128, 270)
+            target_price = int(content_width * 0.24)
+            max_price = self._scaled(270, 230, 420)
+            min_name = self._scaled(210, 160, 430)
+        available = max(self._scaled(260, 220, 520), content_width - index_width - rating_width - gap * 3)
+        price_width = min(max(min_price, target_price), max_price, max(min_price, int(available * 0.56)))
+        name_width = available - price_width
+        if name_width < min_name:
+            shortfall = min(min_name - name_width, max(0, price_width - min_price))
+            price_width -= shortfall
+            name_width = available - price_width
+        price_width = max(self._scaled(120, 110, 240), int(price_width))
+        name_width = max(self._scaled(120, 110, 260), int(name_width))
+        return {
+            "index": index_width,
+            "price": price_width,
+            "rating": rating_width,
+            "gap": gap,
+            "name": name_width,
+        }
+
+    def _overlay_result_style(self, price_kind: str = "normal") -> dict[str, int | tuple[int, int]]:
+        if price_kind == "wide":
+            return {
+                "rating_size": self._scaled(18, 16, 26),
+                "name_font_delta": -4,
+                "price_font_delta": -4,
+                "trend_font_delta": -7,
+                "row_pady": self._scaled(1, 1, 4),
+                "separator_pad": (0, self._scaled(2, 2, 5)),
+            }
+        return {
+            "rating_size": self._scaled(17, 15, 24),
+            "name_font_delta": -4,
+            "price_font_delta": -4,
+            "trend_font_delta": -7,
+            "row_pady": self._scaled(1, 1, 4),
+            "separator_pad": (0, self._scaled(2, 2, 5)),
+        }
+
+    def _overlay_result_bottom_padding(self) -> int:
+        return self._scaled(8, 8, 14)
+
+    def _render_overlay_market_result_row(
+        self,
+        parent,
+        index: int,
+        row_data: MarketRow,
+        price_text: str,
+        trend: str,
+        content_width: int,
+        rating_size: int,
+        price_kind: str,
+        name_font_delta: int,
+        price_font_delta: int,
+        trend_font_delta: int,
+        separator_pad: tuple[int, int],
+        row_pady: int,
+        marker_prefix: str = "",
+    ):
+        theme = self.theme
+        metrics = self._overlay_result_layout_metrics(content_width, rating_size, price_kind)
+        item = Frame(parent, bg=theme.overlay_surface, pady=row_pady)
+        item.pack(fill=X)
+        if index:
+            Canvas(item, height=1, bg=theme.overlay_border, highlightthickness=0).pack(fill=X, pady=separator_pad)
+
+        body = Frame(item, bg=theme.overlay_surface)
+        body.pack(fill=X)
+        body.columnconfigure(0, minsize=metrics["index"], weight=0)
+        body.columnconfigure(1, minsize=metrics["name"], weight=4)
+        body.columnconfigure(2, minsize=metrics["price"], weight=0)
+        body.columnconfigure(3, minsize=metrics["rating"], weight=0)
+        body.rowconfigure(0, weight=0)
+        body.rowconfigure(1, weight=0)
+
+        Label(
+            body,
+            text=str(index + 1),
+            fg=theme.subtle,
+            bg=theme.overlay_surface,
+            font=self._ui_font(-2, "bold"),
+            anchor="center",
+        ).grid(row=0, column=0, rowspan=2, sticky="new", padx=(0, metrics["gap"]), pady=(0, 0))
+
+        name_box = Frame(body, bg=theme.overlay_surface)
+        name_box.grid(row=0, column=1, rowspan=2, sticky="nsew", padx=(0, metrics["gap"]))
+        Label(
+            name_box,
+            text=row_data.item_name,
+            fg=theme.overlay_text,
+            bg=theme.overlay_surface,
+            font=self._ui_font(name_font_delta, "bold"),
+            anchor="w",
+            justify=LEFT,
+            wraplength=metrics["name"],
+        ).pack(anchor="w")
+        updated = self._format_time(row_data.latest_at)
+        subtitle = f"{row_data.source}  {updated}" if updated else row_data.source
+        Label(
+            name_box,
+            text=subtitle,
+            fg=self._overlay_meta_color(),
+            bg=theme.overlay_surface,
+            font=self._ui_font(-8),
+            justify=LEFT,
+            wraplength=metrics["name"],
+        ).pack(anchor="w", pady=(0, 0))
+
+        price_stack = Frame(
+            body,
+            bg=theme.overlay_surface,
+            width=metrics["price"],
+        )
+        price_stack.grid_propagate(False)
+        price_stack.grid(row=0, column=2, rowspan=2, sticky="nsew", padx=(0, metrics["gap"]))
+
+        price_label = self._overlay_price_label(
+            price_stack,
+            text=price_text,
+            bg=theme.overlay_surface,
+            font_delta=price_font_delta,
+            justify=RIGHT,
+            wraplength=metrics["price"],
+        )
+        price_label.pack(anchor="e")
+
+        rating_slot = Frame(
+            body,
+            bg=theme.overlay_surface,
+            width=metrics["rating"],
+            height=self._rating_slot_height(rating_size),
+        )
+        rating_slot.pack_propagate(False)
+        rating_slot.grid(row=0, column=3, sticky="ne", pady=(0, 0))
+        self._render_rating_button_inline(
+            rating_slot,
+            row_data.realtime_record_id,
+            row_data.source,
+            theme.overlay_surface,
+            size=rating_size,
+            upvotes=row_data.realtime_upvotes,
+        )
+
+        trend_label = self._overlay_trend_label(
+            price_stack,
+            trend,
+            theme.overlay_surface,
+            trend_font_delta,
+            justify=RIGHT,
+            wraplength=metrics["price"],
+        )
+        trend_label.pack(anchor="e", pady=(0, 0))
+
+        if marker_prefix:
+            item_attr = f"_{marker_prefix}_row"
+            price_box_attr = f"_{marker_prefix}_price_box"
+            price_value_attr = f"_{marker_prefix}_price_value"
+            rating_slot_attr = f"_{marker_prefix}_rating_slot"
+            trend_value_attr = f"_{marker_prefix}_trend_value"
+            setattr(item, item_attr, True)
+            setattr(price_stack, price_box_attr, True)
+            setattr(price_label, price_value_attr, True)
+            setattr(rating_slot, rating_slot_attr, True)
+            setattr(trend_label, trend_value_attr, True)
+            price_stack.configure(width=metrics["price"])
+        return item
+
     def _clear_realtime_current_rating(self) -> None:
         holder = self.realtime_import_labels.get("current_rating")
         if holder is None:
@@ -3860,6 +4868,37 @@ class PriceTrackerApp:
                 child.destroy()
         except Exception:
             pass
+
+    def _set_realtime_current_price_labels(
+        self,
+        main: str,
+        trend: str = "",
+        meta: str = "",
+        main_color: str | None = None,
+        trend_color: str | None = None,
+    ) -> None:
+        labels = self.realtime_import_labels
+        theme = getattr(self, "theme", theme_for_key("default"))
+        main_label = labels.get("current_price_main")
+        trend_label = labels.get("current_price_trend")
+        meta_label = labels.get("current_price_meta")
+        legacy_label = labels.get("current_price")
+        if main_label is None and trend_label is None and meta_label is None and legacy_label is not None:
+            text_parts = [main]
+            if trend:
+                text_parts.append(trend)
+            if meta:
+                text_parts.append(meta)
+            legacy_label.configure(text=" · ".join(text_parts), fg=main_color or theme.overlay_muted)
+            return
+        if main_label is not None:
+            main_label.configure(text=main, fg=main_color or theme.overlay_muted, bg=theme.overlay_surface)
+            main_label._overlay_value_label = "price" if main_color else ""  # type: ignore[attr-defined]
+        if trend_label is not None:
+            trend_label.configure(text=trend, fg=trend_color or theme.overlay_muted, bg=theme.overlay_surface)
+            trend_label._overlay_value_label = "trend" if trend_color else ""  # type: ignore[attr-defined]
+        if meta_label is not None:
+            meta_label.configure(text=meta, fg=theme.overlay_muted, bg=theme.overlay_surface)
 
     def _realtime_current_price_target_currency(self) -> str:
         recognized = canonical_currency(self.realtime_currency_var.get().strip())
@@ -3953,7 +4992,13 @@ class PriceTrackerApp:
             bg = str(parent["bg"])
             for child in parent.winfo_children():
                 child.destroy()
-            self._rating_button(parent, record_id, bg, size=20, upvotes=upvotes).pack(side=LEFT)
+            self._rating_button(
+                parent,
+                record_id,
+                bg,
+                size=self._scaled(20, 18, 30),
+                upvotes=upvotes,
+            ).pack(side=LEFT)
         except Exception:
             pass
         self.status_var.set("已点赞。")
@@ -4062,6 +5107,39 @@ class PriceTrackerApp:
     def on_market_tree_motion(self, _event=None) -> None:
         self._schedule_trend_render(120)
 
+    def _market_tree_scroll_if_changed(self, orient: str, units: int) -> str:
+        if not self._has_market_tree() or units == 0:
+            return "break"
+        before = self.market_tree.yview() if orient == "y" else self.market_tree.xview()
+        if orient == "y":
+            self.market_tree.yview_scroll(units, "units")
+            after = self.market_tree.yview()
+        else:
+            self.market_tree.xview_scroll(units, "units")
+            after = self.market_tree.xview()
+        if after != before:
+            self._schedule_trend_render(80)
+        return "break"
+
+    def on_market_tree_mousewheel(self, event) -> str:
+        if getattr(event, "num", 0) == 4:
+            units = -3
+        elif getattr(event, "num", 0) == 5:
+            units = 3
+        else:
+            delta = int(getattr(event, "delta", 0) or 0)
+            units = -1 * int(delta / 120) if delta else 0
+            if units == 0 and delta:
+                units = -1 if delta > 0 else 1
+        return self._market_tree_scroll_if_changed("y", units)
+
+    def on_market_tree_shift_mousewheel(self, event) -> str:
+        delta = int(getattr(event, "delta", 0) or 0)
+        units = -1 * int(delta / 120) if delta else 0
+        if units == 0 and delta:
+            units = -1 if delta > 0 else 1
+        return self._market_tree_scroll_if_changed("x", units)
+
     def _render_trend_canvases(self) -> None:
         if not self._has_market_tree():
             return
@@ -4074,7 +5152,7 @@ class PriceTrackerApp:
         render_rating = not visible or "rating" in visible
         for iid in self.market_tree.get_children():
             tags = self.market_tree.item(iid, "tags")
-            bg = "#fff7d6" if "pinned" in tags else "#ffffff"
+            bg = self.theme.pinned if "pinned" in tags else self.theme.surface
             if render_trend:
                 bbox = self.market_tree.bbox(iid, "trend")
                 if bbox:
@@ -4100,18 +5178,31 @@ class PriceTrackerApp:
         x, y, width, height = bbox
         if width <= 42 or height <= 18 or y < 0 or y + height > tree_height - 3:
             return
-        holder_width = min(max(78, width - 4), 116)
+        holder_width = min(max(self._scaled(78, 78, 130), width - 4), self._scaled(116, 116, 180))
+        holder_height = self._scaled(28, 28, 42)
         holder = Frame(self.market_tree, bg=bg)
-        holder.place(x=x + max(2, int((width - holder_width) / 2)), y=y + max(1, int((height - 28) / 2)), width=holder_width, height=28)
-        self._rating_button(holder, row.realtime_record_id, bg, size=20, upvotes=row.realtime_upvotes).pack(side=LEFT)
+        holder.place(
+            x=x + max(2, int((width - holder_width) / 2)),
+            y=y + max(1, int((height - holder_height) / 2)),
+            width=holder_width,
+            height=holder_height,
+        )
+        self._rating_button(
+            holder,
+            row.realtime_record_id,
+            bg,
+            size=self._scaled(20, 18, 30),
+            upvotes=row.realtime_upvotes,
+        ).pack(side=LEFT)
         self.rating_widgets.append(holder)
 
     def _draw_trend(self, canvas: Canvas, values: list[float], percent: str, width: int, height: int) -> None:
-        color = "#7b8794"
+        theme = self.theme
+        color = theme.muted
         if percent.startswith("+"):
-            color = "#18a058"
+            color = theme.success
         elif percent.startswith("-"):
-            color = "#d03050"
+            color = theme.danger
         canvas.create_rectangle(0, 0, width, height, fill=str(canvas["bg"]), outline="")
         percent_width = 0
         if percent:
@@ -4130,7 +5221,7 @@ class PriceTrackerApp:
                 points.extend((round(px, 1), round(max(3, min(height - 3, py)), 1)))
             canvas.create_line(*points, fill=color, width=2, smooth=True, capstyle="round", joinstyle="round")
         if percent:
-            canvas.create_text(width - 6, height / 2, text=percent, anchor="e", fill=color, font=("Microsoft YaHei UI", 9, "bold"))
+            canvas.create_text(width - 6, height / 2, text=percent, anchor="e", fill=color, font=self._ui_font(-6, "bold"))
 
     def _auto_fit_market_columns(self) -> None:
         if not self._has_market_tree():
@@ -4139,8 +5230,8 @@ class PriceTrackerApp:
         visible = list(self.market_tree["columns"]) if display_columns == "#all" or display_columns == ("#all",) else list(display_columns)
         if not visible:
             return
-        icon_width = 58 if "图标" in self.config.visible_columns else 0
-        tree_width = max(760, self.market_tree.winfo_width() - 26 - icon_width)
+        icon_width = self._scaled(58, 58, 90) if "图标" in self.config.visible_columns else 0
+        tree_width = max(self._scaled(760, 760, 1240), self.market_tree.winfo_width() - 26 - icon_width)
         weights = {
             "index": 0.55,
             "item": 2.9,
@@ -4154,16 +5245,16 @@ class PriceTrackerApp:
             "favorite": 0.9,
         }
         mins = {
-            "index": 68,
-            "item": 220,
-            "price": 110,
-            "currency": 90,
-            "trend": 150,
-            "count": 78,
-            "source": 120,
-            "rating": 118,
-            "updated": 165,
-            "favorite": 90,
+            "index": self._scaled(68, 68, 110),
+            "item": self._scaled(220, 220, 360),
+            "price": self._scaled(110, 110, 180),
+            "currency": self._scaled(90, 90, 150),
+            "trend": self._scaled(150, 150, 240),
+            "count": self._scaled(78, 78, 125),
+            "source": self._scaled(120, 120, 210),
+            "rating": self._scaled(118, 118, 190),
+            "updated": self._scaled(165, 165, 260),
+            "favorite": self._scaled(90, 90, 140),
         }
         total_weight = sum(weights.get(column, 1.0) for column in visible)
         widths = {
@@ -4174,7 +5265,13 @@ class PriceTrackerApp:
         if overflow > 0 and "item" in widths:
             widths["item"] = max(mins["item"], widths["item"] - overflow)
         for column in self.market_tree["columns"]:
-            self.market_tree.column(column, width=widths.get(column, mins.get(column, 90)), minwidth=mins.get(column, 90))
+            anchor = "center" if column in {"index", "favorite", "count", "currency", "source", "updated"} else "w"
+            self.market_tree.column(
+                column,
+                width=widths.get(column, mins.get(column, 90)),
+                minwidth=mins.get(column, 90),
+                anchor=anchor,
+            )
         self._schedule_trend_render()
 
     def toggle_selected_favorite(self, item_name: str | None = None) -> None:
@@ -4272,8 +5369,14 @@ class PriceTrackerApp:
         key = theme_key_for_label(self.ui_theme_var.get())
         self.config.ui_theme = key
         save_config(self.config)
+        rebuild_settings = self.current_page_name == "settings"
         self._configure_style()
-        self._apply_theme_to_widget_tree(self.root)
+        if rebuild_settings:
+            self._clear_content()
+            self._apply_theme_special_widgets()
+            self.show_settings_page()
+        else:
+            self._apply_theme_to_widget_tree(self.root)
         self._refresh_version_status_widget(self.version_status_var.get(), self.version_update_available)
         self.status_var.set(f"界面皮肤已切换为 {theme_label_for_key(key)}。")
 
@@ -4315,24 +5418,58 @@ class PriceTrackerApp:
         data_columns = [key for key in key_to_label if key != "icon"]
         self.market_tree.configure(displaycolumns=visible or data_columns)
         if "图标" in self.config.visible_columns:
-            self.market_tree.column("#0", width=58, minwidth=42, stretch=False)
+            self.market_tree.column("#0", width=self._scaled(58, 58, 90), minwidth=self._scaled(42, 42, 70), stretch=False)
         else:
             self.market_tree.column("#0", width=0, minwidth=0, stretch=False)
         self.root.update_idletasks()
         self._auto_fit_market_columns()
 
     def open_column_settings(self) -> None:
+        existing = getattr(self, "column_settings_window", None)
+        if existing is not None and self._toplevel_exists(existing):
+            try:
+                existing.lift()
+                existing.focus_force()
+            except Exception:
+                pass
+            return
         window = Toplevel(self.root)
+        self.column_settings_window = window
         window.title("显示列")
-        window.geometry("360x420")
+        self._apply_toplevel_icon(window)
+        window.geometry(f"{self._scaled(420, 420, 600)}x{self._scaled(500, 500, 720)}")
+        window.minsize(self._scaled(360, 360, 520), self._scaled(420, 420, 620))
+        window.configure(bg=self.theme.background)
+        window.protocol("WM_DELETE_WINDOW", lambda: self._close_column_settings_window(window))
         variables: dict[str, StringVar] = {}
         labels = ["序号", "图标", "物品", "价格", "单位", "走势", "记录", "来源", "评价", "更新时间", "收藏"]
-        body = Frame(window, padx=16, pady=16)
-        body.pack(fill=BOTH, expand=True)
+        shell = Frame(window, padx=self._scaled(18, 18, 28), pady=self._scaled(18, 18, 28))
+        shell.pack(fill=BOTH, expand=True)
+        Label(shell, text="显示列", font=self._ui_font(2, "bold")).pack(anchor="w")
+        Label(
+            shell,
+            text="选择物价列表中需要显示的字段。物品列始终保留。",
+            foreground=self.theme.muted,
+            wraplength=self._scaled(360, 360, 520),
+            justify=LEFT,
+        ).pack(anchor="w", pady=(self._scaled(4, 4, 8), self._scaled(12, 12, 18)))
+        scroll_box = Frame(shell)
+        scroll_box.pack(fill=BOTH, expand=True)
+        canvas = Canvas(scroll_box, highlightthickness=0, bg=self.theme.background)
+        scroll = ttk.Scrollbar(scroll_box, orient="vertical", command=canvas.yview)
+        body = Frame(canvas, padx=2, pady=2)
+        body_window = canvas.create_window((0, 0), window=body, anchor="nw")
+        body.bind("<Configure>", lambda _event: canvas.configure(scrollregion=canvas.bbox("all") or (0, 0, 0, 0)))
+        canvas.bind("<Configure>", lambda event: canvas.itemconfigure(body_window, width=event.width))
+        canvas.configure(yscrollcommand=scroll.set)
+        canvas.pack(side=LEFT, fill=BOTH, expand=True)
+        scroll.pack(side=RIGHT, fill=Y)
         for label in labels:
             var = StringVar(value="1" if label in self.config.visible_columns else "0")
             variables[label] = var
-            ttk.Checkbutton(body, text=label, variable=var, onvalue="1", offvalue="0").pack(anchor="w", pady=4)
+            row = Frame(body, pady=self._scaled(3, 3, 6))
+            row.pack(fill=X)
+            ttk.Checkbutton(row, text=label, variable=var, onvalue="1", offvalue="0").pack(anchor="w")
 
         def save_columns():
             selected = [label for label, var in variables.items() if var.get() == "1"]
@@ -4342,9 +5479,20 @@ class PriceTrackerApp:
             save_config(self.config)
             self._apply_visible_columns()
             self._schedule_trend_render()
-            window.destroy()
+            self._close_column_settings_window(window)
 
-        Button(body, text="保存", command=save_columns).pack(anchor="e", pady=(12, 0))
+        footer = Frame(shell)
+        footer.pack(fill=X, pady=(self._scaled(14, 14, 22), 0))
+        Button(footer, text="取消", command=lambda: self._close_column_settings_window(window), style="Ghost.TButton").pack(side=RIGHT)
+        Button(footer, text="保存", command=save_columns, style="Accent.TButton").pack(side=RIGHT, padx=(0, self._scaled(8, 8, 14)))
+
+    def _close_column_settings_window(self, window: Toplevel) -> None:
+        if getattr(self, "column_settings_window", None) is window:
+            self.column_settings_window = None
+        try:
+            window.destroy()
+        except Exception:
+            pass
 
     def _register_hotkeys(self) -> None:
         self.hotkeys.register(
@@ -4603,8 +5751,8 @@ class PriceTrackerApp:
         container = Frame(
             outer,
             bg=theme.overlay_surface,
-            padx=16,
-            pady=12,
+            padx=self._scaled(14, 14, 22),
+            pady=self._scaled(9, 9, 16),
             highlightthickness=0 if self.config.focus_search_rounded else 1,
             highlightbackground=theme.overlay_border,
         )
@@ -4613,9 +5761,9 @@ class PriceTrackerApp:
 
         search_row = Frame(container, bg=theme.overlay_surface)
         search_row.pack(fill=X)
-        Label(search_row, text="搜索", fg=theme.overlay_muted, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 12, "bold")).pack(side=LEFT)
-        entry = Entry(search_row, textvariable=self.focus_search_var, font=("Microsoft YaHei UI", 17))
-        entry.pack(side=LEFT, fill=X, expand=True, padx=(12, 0), ipady=3)
+        Label(search_row, text="搜索", fg=theme.overlay_muted, bg=theme.overlay_surface, font=self._ui_font(-2, "bold")).pack(side=LEFT)
+        entry = Entry(search_row, textvariable=self.focus_search_var, font=self._ui_font(2))
+        entry.pack(side=LEFT, fill=X, expand=True, padx=(self._scaled(12, 10, 20), 0), ipady=self._scaled(3, 3, 6))
         entry.bind("<KeyRelease>", self.schedule_focus_search_refresh)
         entry.bind("<Escape>", lambda _event: self.destroy_focus_search_overlay())
         entry.bind("<Control-space>", lambda _event: self.destroy_focus_search_overlay())
@@ -4625,14 +5773,14 @@ class PriceTrackerApp:
             search_row,
             textvariable=self.display_currency_var,
             values=["神圣石", "崇高石", "混沌石"],
-            width=7,
+            width=8,
             state="readonly",
         )
-        unit.pack(side=LEFT, padx=(8, 0))
+        unit.pack(side=LEFT, padx=(self._scaled(8, 8, 14), 0))
         unit.bind("<<ComboboxSelected>>", self.on_focus_search_currency_change)
 
         result_box = Frame(container, bg=theme.overlay_surface)
-        result_box.pack(fill=BOTH, expand=True, pady=(7, 0))
+        result_box.pack(fill=BOTH, expand=True, pady=(self._scaled(5, 5, 9), 0))
         result_canvas = Canvas(result_box, bg=theme.overlay_surface, highlightthickness=0)
         result_scrollbar = ttk.Scrollbar(result_box, orient="vertical", command=result_canvas.yview)
         result_inner = Frame(result_canvas, bg=theme.overlay_surface)
@@ -4649,7 +5797,7 @@ class PriceTrackerApp:
         self.focus_search_result_window = result_window
         self.focus_search_results_scrollbar = result_scrollbar
         self.focus_search_var.set(self.search_var.get().strip())
-        self._position_focus_search_overlay(96)
+        self._position_focus_search_overlay(self._focus_search_base_height())
         overlay.after(30, lambda: self._focus_search_entry_force_focus(entry))
         overlay.after(40, lambda: entry.selection_range(0, END))
         self.schedule_focus_search_refresh()
@@ -4674,14 +5822,33 @@ class PriceTrackerApp:
         overlay = self.focus_search_overlay
         if overlay is None:
             return
-        width = 640
-        screen_width = overlay.winfo_screenwidth()
-        screen_height = overlay.winfo_screenheight()
-        x = max(24, int((screen_width - width) / 2))
-        center_y = int(screen_height * (1 - 0.618))
-        y = max(24, center_y - int(height / 2))
+        width = self._focus_search_width()
+        left, top, right, bottom = self._current_monitor_work_area()
+        max_height = max(self._focus_search_base_height(), bottom - top - 48)
+        height = min(height, max_height)
+        x = left + max(24, int((right - left - width) / 2))
+        center_y = top + int((bottom - top) * (1 - 0.618))
+        y = max(top + 24, min(center_y - int(height / 2), bottom - height - 24))
         overlay.geometry(f"{width}x{height}+{x}+{y}")
         self._draw_focus_search_shell(width, height)
+
+    def _focus_search_width(self) -> int:
+        try:
+            left, _top, right, _bottom = self._current_monitor_work_area()
+            available = max(360, right - left - 48)
+        except Exception:
+            available = 960
+        return min(available, self._scaled(720, 680, 1040))
+
+    def _focus_search_base_height(self) -> int:
+        return self._scaled(78, 78, 116)
+
+    def _focus_search_content_width(self) -> int:
+        return max(360, self._focus_search_width() - self._scaled(58, 58, 96))
+
+    def _focus_search_price_column_width(self) -> int:
+        content_width = self._focus_search_content_width()
+        return self._overlay_result_layout_metrics(content_width, self._scaled(19, 17, 28), "normal")["price"]
 
     def _draw_focus_search_shell(self, width: int, height: int) -> None:
         canvas = self.focus_search_outer_canvas
@@ -4757,27 +5924,29 @@ class PriceTrackerApp:
         if overlay is None:
             return
         self._clear_screenshot_lookup_results()
-        header = Frame(self.screenshot_lookup_results, bg="#ffffff", pady=4)
+        theme = self.theme
+        header = Frame(self.screenshot_lookup_results, bg=theme.overlay_surface, pady=self._scaled(4, 4, 8))
         header.pack(fill=X)
         Label(
             header,
             text="正在识别截图",
-            fg="#172033",
-            bg="#ffffff",
-            font=("Microsoft YaHei UI", 15, "bold"),
+            fg=theme.overlay_text,
+            bg=theme.overlay_surface,
+            font=self._ui_font(0, "bold"),
         ).pack(anchor="w")
         loading = Label(
             header,
             text="正在分析物品区域和本地物价...",
-            fg="#7b8794",
-            bg="#ffffff",
-            font=("Microsoft YaHei UI", 11),
+            fg=theme.overlay_muted,
+            bg=theme.overlay_surface,
+            font=self._ui_font(-3),
         )
-        loading.pack(anchor="w", pady=(6, 0))
+        loading.pack(anchor="w", pady=(self._scaled(6, 6, 10), 0))
         self._bind_screenshot_lookup_drag_recursive(header)
         self.screenshot_lookup_loading_label = loading
-        self._configure_screenshot_lookup_scroll(46, False)
-        self._position_screenshot_lookup_overlay(126)
+        loading_height = self._measure_screenshot_lookup_content_height(min_height=self._scaled(46, 46, 72))
+        self._configure_screenshot_lookup_scroll(loading_height, False)
+        self._position_screenshot_lookup_overlay(self._screenshot_lookup_overlay_height(loading_height, 0, False))
         self._animate_screenshot_lookup_loading()
         self._show_screenshot_lookup_overlay(overlay)
 
@@ -4811,8 +5980,8 @@ class PriceTrackerApp:
         container = Frame(
             outer,
             bg=theme.overlay_surface,
-            padx=16,
-            pady=12,
+            padx=self._scaled(14, 14, 22),
+            pady=self._scaled(9, 9, 16),
             highlightthickness=0 if self.config.focus_search_rounded else 1,
             highlightbackground=theme.overlay_border,
         )
@@ -4827,18 +5996,18 @@ class PriceTrackerApp:
             text="截图查价",
             fg=theme.overlay_muted,
             bg=theme.overlay_surface,
-            font=("Microsoft YaHei UI", 12, "bold"),
+            font=self._ui_font(-2, "bold"),
         ).pack(side=LEFT)
         Label(
             title_row,
             text="Esc 关闭",
             fg=theme.subtle,
             bg=theme.overlay_surface,
-            font=("Microsoft YaHei UI", 10),
+            font=self._ui_font(-5),
         ).pack(side=RIGHT)
 
         result_box = Frame(container, bg=theme.overlay_surface)
-        result_box.pack(fill=X, expand=False, pady=(8, 0))
+        result_box.pack(fill=X, expand=False, pady=(self._scaled(5, 5, 9), 0))
         result_canvas = Canvas(result_box, bg=theme.overlay_surface, highlightthickness=0, takefocus=1)
         result_canvas.bind("<Escape>", lambda _event: self.destroy_screenshot_lookup_overlay())
         result_scrollbar = ttk.Scrollbar(result_box, orient="vertical", command=result_canvas.yview)
@@ -4958,101 +6127,84 @@ class PriceTrackerApp:
         self._clear_screenshot_lookup_results()
         theme = self.theme
         if not rows:
-            box = Frame(self.screenshot_lookup_results, bg=theme.overlay_surface, pady=8)
+            box = Frame(self.screenshot_lookup_results, bg=theme.overlay_surface, pady=self._scaled(8, 8, 14))
             box.pack(fill=X)
             Label(
                 box,
                 text="没有查到可靠物品",
                 fg=theme.overlay_text,
                 bg=theme.overlay_surface,
-                font=("Microsoft YaHei UI", 14, "bold"),
+                font=self._ui_font(-1, "bold"),
             ).pack(anchor="w")
             Label(
                 box,
                 text=message or "已把截图和识别文字放到截图识别页，可以稍后手动确认。",
                 fg=theme.overlay_muted,
                 bg=theme.overlay_surface,
-                font=("Microsoft YaHei UI", 10),
-                wraplength=600,
+                font=self._ui_font(-4),
+                wraplength=self._screenshot_lookup_content_width(),
                 justify=LEFT,
             ).pack(anchor="w", pady=(6, 0))
             self._bind_screenshot_lookup_drag_recursive(box)
-            empty_height = self._measure_screenshot_lookup_content_height(min_height=58)
-            self._configure_screenshot_lookup_scroll(empty_height, False)
-            self._position_screenshot_lookup_overlay(self._screenshot_lookup_overlay_height(empty_height, 0, False))
+            empty_height = self._measure_screenshot_lookup_content_height(min_height=self._scaled(58, 58, 88))
+            empty_scrollable = self._screenshot_lookup_unclamped_overlay_height(empty_height, 0, False) > self._screenshot_lookup_max_overlay_height()
+            if empty_scrollable:
+                empty_height = min(empty_height, self._screenshot_lookup_max_result_height(0, True))
+            self._configure_screenshot_lookup_scroll(empty_height, empty_scrollable)
+            self._position_screenshot_lookup_overlay(self._screenshot_lookup_overlay_height(empty_height, 0, empty_scrollable))
             self._show_screenshot_lookup_overlay(overlay)
             return
 
+        rate = self.db.get_exalted_per_divine()
+        chaos_per_divine = self.db.get_chaos_per_divine()
         for index, (row_data, confidence, raw_text) in enumerate(rows):
-            self._render_screenshot_lookup_row(index, row_data, confidence, raw_text)
+            self._render_screenshot_lookup_row(index, row_data, confidence, raw_text, rate, chaos_per_divine)
         visible_rows = min(len(rows), 5)
-        result_height = self._measure_screenshot_lookup_result_height(visible_rows, len(rows) > 5)
-        self._configure_screenshot_lookup_scroll(result_height, len(rows) > 5)
-        self._position_screenshot_lookup_overlay(
-            self._screenshot_lookup_overlay_height(result_height, len(rows), len(rows) > 5)
-        )
+        scrollable = len(rows) > 5
+        result_height = self._measure_screenshot_lookup_result_height(visible_rows, scrollable)
+        if scrollable:
+            result_height = min(result_height, self._screenshot_lookup_max_result_height(len(rows), True))
+        elif self._screenshot_lookup_unclamped_overlay_height(result_height, len(rows), False) > self._screenshot_lookup_max_overlay_height():
+            scrollable = True
+            result_height = min(result_height, self._screenshot_lookup_max_result_height(len(rows), True))
+        self._configure_screenshot_lookup_scroll(result_height, scrollable)
+        self._position_screenshot_lookup_overlay(self._screenshot_lookup_overlay_height(result_height, len(rows), scrollable))
         self._show_screenshot_lookup_overlay(overlay)
         self._focus_screenshot_lookup_overlay(overlay)
 
-    def _render_screenshot_lookup_row(self, index: int, row_data: MarketRow, confidence: float, raw_text: str) -> None:
+    def _render_screenshot_lookup_row(
+        self,
+        index: int,
+        row_data: MarketRow,
+        confidence: float,
+        raw_text: str,
+        rate: float,
+        chaos_per_divine: float,
+    ) -> None:
         if self.screenshot_lookup_results is None:
             return
         theme = self.theme
-        item = Frame(self.screenshot_lookup_results, bg=theme.overlay_surface, pady=5)
-        item.pack(fill=X)
-        if index:
-            Canvas(item, height=1, bg=theme.overlay_border, highlightthickness=0).pack(fill=X, pady=(0, 7))
-        body = Frame(item, bg=theme.overlay_surface)
-        body.pack(fill=X)
-        order = Label(
-            body,
-            text=str(index + 1),
-            fg=theme.subtle,
-            bg=theme.overlay_surface,
-            font=("Microsoft YaHei UI", 12, "bold"),
-            width=3,
-            anchor="w",
-        )
-        order.pack(side=LEFT)
-        name_box = Frame(body, bg=theme.overlay_surface)
-        name_box.pack(side=LEFT, fill=X, expand=True)
-        Label(
-            name_box,
-            text=row_data.item_name,
-            fg=theme.overlay_text,
-            bg=theme.overlay_surface,
-            font=("Microsoft YaHei UI", 13, "bold"),
-            anchor="w",
-        ).pack(anchor="w")
-        updated = self._format_time(row_data.latest_at)
-        subtitle = f"{row_data.source}  {updated}" if updated else row_data.source
-        Label(name_box, text=subtitle, fg=theme.overlay_muted, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(1, 0))
-
         target_currency = self.display_currency_var.get() or self.config.display_currency
-        rate = self.db.get_exalted_per_divine()
-        chaos_per_divine = self.db.get_chaos_per_divine()
         amount = display_amount_for_item(
             row_data.item_name, row_data.latest_amount, row_data.latest_currency, target_currency, rate, chaos_per_divine
         )
-        price_box = Frame(body, bg=theme.overlay_surface)
-        price_box.pack(side=RIGHT, padx=(16, 0))
-        self._render_rating_controls(
-            price_box,
-            row_data.realtime_record_id,
-            row_data.source,
-            theme.overlay_surface,
-            size=19,
-            upvotes=row_data.realtime_upvotes,
+        style = self._overlay_result_style("wide")
+        item = self._render_overlay_market_result_row(
+            self.screenshot_lookup_results,
+            index=index,
+            row_data=row_data,
+            price_text=f"{self._format_amount(amount)} {target_currency}",
+            trend=row_data.trend_percent,
+            content_width=self._screenshot_lookup_content_width(),
+            rating_size=int(style["rating_size"]),
+            price_kind="wide",
+            name_font_delta=int(style["name_font_delta"]),
+            price_font_delta=int(style["price_font_delta"]),
+            trend_font_delta=int(style["trend_font_delta"]),
+            separator_pad=style["separator_pad"],  # type: ignore[arg-type]
+            row_pady=int(style["row_pady"]),
+            marker_prefix="screenshot_lookup",
         )
-        Label(
-            price_box,
-            text=f"{self._format_amount(amount)} {target_currency}",
-            fg=theme.overlay_accent,
-            bg=theme.overlay_surface,
-            font=("Microsoft YaHei UI", 13, "bold"),
-        ).pack(anchor="e")
-        trend_color = theme.success if row_data.trend_percent.startswith("+") else theme.danger if row_data.trend_percent.startswith("-") else theme.overlay_muted
-        Label(price_box, text=f"趋势 {row_data.trend_percent or '暂无'}", fg=trend_color, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 9)).pack(anchor="e")
         self._bind_screenshot_lookup_drag_recursive(item)
         self._bind_screenshot_lookup_click_recursive(item, row_data.item_name)
 
@@ -5084,27 +6236,66 @@ class PriceTrackerApp:
             measured = sum(max(child.winfo_reqheight(), child.winfo_height()) for child in children)
         except Exception:
             measured = 0
-        return max(min_height, measured + 2)
+        return max(min_height, measured + self._overlay_result_bottom_padding())
 
     def _measure_screenshot_lookup_result_height(self, visible_rows: int, scrollable: bool = False) -> int:
-        min_row_height = 60 if not scrollable else 66
+        min_row_height = self._scaled(50 if not scrollable else 56, 48, 88)
         content_height = self._measure_screenshot_lookup_content_height(min_height=max(1, visible_rows) * min_row_height)
         if scrollable:
-            return min(340, max(max(1, visible_rows) * 66, content_height + 4))
-        return max(max(1, visible_rows) * 56, content_height)
+            return min(self._scaled(320, 300, 500), max(max(1, visible_rows) * min_row_height, content_height + self._scaled(2, 2, 6)))
+        return max(max(1, visible_rows) * self._scaled(48, 46, 78), content_height)
 
-    @staticmethod
-    def _screenshot_lookup_overlay_height(result_height: int, row_count: int, scrollable: bool) -> int:
-        chrome = 76
+    def _screenshot_lookup_overlay_height(self, result_height: int, row_count: int, scrollable: bool) -> int:
+        return min(
+            self._screenshot_lookup_max_overlay_height(),
+            self._screenshot_lookup_unclamped_overlay_height(result_height, row_count, scrollable),
+        )
+
+    def _screenshot_lookup_unclamped_overlay_height(self, result_height: int, row_count: int, scrollable: bool) -> int:
+        vertical_chrome = self._screenshot_lookup_vertical_chrome(row_count, scrollable)
+        return max(self._scaled(118, 118, 168), int(vertical_chrome + result_height))
+
+    def _screenshot_lookup_vertical_chrome(self, row_count: int, scrollable: bool) -> int:
+        chrome = self._scaled(58, 58, 94)
         if row_count <= 0:
-            bottom_padding = 12
+            bottom_padding = self._scaled(8, 8, 14)
         elif scrollable:
-            bottom_padding = 18
+            bottom_padding = self._scaled(12, 12, 22)
         elif row_count <= 2:
-            bottom_padding = 10
+            bottom_padding = self._scaled(5, 5, 10)
         else:
-            bottom_padding = 14
-        return max(118, int(chrome + result_height + bottom_padding))
+            bottom_padding = self._scaled(8, 8, 16)
+        return chrome + bottom_padding
+
+    def _screenshot_lookup_max_overlay_height(self) -> int:
+        try:
+            _left, top, _right, bottom = self._current_monitor_work_area()
+            available = bottom - top - self._scaled(48, 48, 72)
+        except Exception:
+            available = self.root.winfo_screenheight() - self._scaled(48, 48, 72)
+        return max(self._scaled(180, 180, 260), int(available))
+
+    def _screenshot_lookup_max_result_height(self, row_count: int, scrollable: bool) -> int:
+        max_height = self._screenshot_lookup_max_overlay_height() - self._screenshot_lookup_vertical_chrome(row_count, scrollable)
+        return max(self._scaled(72, 72, 120), int(max_height))
+
+    def _screenshot_lookup_width(self) -> int:
+        return self._scaled(740, 700, 1100)
+
+    def _screenshot_lookup_content_width(self) -> int:
+        try:
+            left, _top, right, _bottom = self._current_monitor_work_area()
+            width = min(self._screenshot_lookup_width(), max(360, right - left - self._scaled(48, 48, 72)))
+        except Exception:
+            width = self._screenshot_lookup_width()
+        return max(360, width - self._scaled(58, 58, 96))
+
+    def _screenshot_lookup_price_column_width(self) -> int:
+        content_width = self._screenshot_lookup_content_width()
+        return self._overlay_result_layout_metrics(content_width, self._scaled(19, 17, 28), "wide")["price"]
+
+    def _screenshot_lookup_price_column_height(self) -> int:
+        return self._scaled(74, 72, 118)
 
     def _configure_screenshot_lookup_scroll(self, height: int, scrollable: bool) -> None:
         canvas = self.screenshot_lookup_results_canvas
@@ -5129,12 +6320,16 @@ class PriceTrackerApp:
         overlay = self.screenshot_lookup_overlay
         if overlay is None:
             return
-        width = 680
-        screen_width = overlay.winfo_screenwidth()
-        screen_height = overlay.winfo_screenheight()
-        x = max(24, int((screen_width - width) / 2))
-        center_y = int(screen_height * (1 - 0.618))
-        y = max(24, center_y - int(height / 2))
+        try:
+            left, top, right, bottom = self._current_monitor_work_area()
+        except Exception:
+            left, top = 0, 0
+            right, bottom = int(overlay.winfo_screenwidth()), int(overlay.winfo_screenheight())
+        width = min(self._screenshot_lookup_width(), max(360, right - left - self._scaled(48, 48, 72)))
+        height = min(height, max(self._scaled(180, 180, 260), bottom - top - self._scaled(48, 48, 72)))
+        x = left + max(self._scaled(24, 24, 36), int((right - left - width) / 2))
+        center_y = top + int((bottom - top) * (1 - 0.618))
+        y = max(top + self._scaled(24, 24, 36), min(center_y - int(height / 2), bottom - height - self._scaled(24, 24, 36)))
         overlay.geometry(f"{width}x{height}+{x}+{y}")
         self._draw_screenshot_lookup_shell(width, height)
 
@@ -5193,7 +6388,7 @@ class PriceTrackerApp:
         query = self.focus_search_var.get().strip()
         if not query:
             self._configure_focus_result_scroll(0, False)
-            self._position_focus_search_overlay(96)
+            self._position_focus_search_overlay(self._focus_search_base_height())
             return
 
         limit = max(1, min(10, int(getattr(self.config, "focus_search_limit", 5) or 5)))
@@ -5208,66 +6403,53 @@ class PriceTrackerApp:
         rate = self.db.get_exalted_per_divine()
         chaos_per_divine = self.db.get_chaos_per_divine()
         theme = self.theme
+        content_width = self._focus_search_content_width()
         if not rows:
-            self._configure_focus_result_scroll(36, False)
-            row = Frame(self.focus_search_results, bg=theme.overlay_surface, pady=8)
+            self._configure_focus_result_scroll(self._scaled(34, 34, 54), False)
+            row = Frame(self.focus_search_results, bg=theme.overlay_surface, pady=self._scaled(4, 4, 8))
             row.pack(fill=X)
-            Label(row, text="没有查询到匹配物品", fg=theme.overlay_muted, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 12)).pack(anchor="w")
-            self._position_focus_search_overlay(144)
+            Label(row, text="没有查询到匹配物品", fg=theme.overlay_muted, bg=theme.overlay_surface, font=self._ui_font(-1)).pack(anchor="w")
+            self._position_focus_search_overlay(self._focus_search_base_height() + self._scaled(38, 38, 58))
             return
 
         for index, row_data in enumerate(rows):
-            item = Frame(self.focus_search_results, bg=theme.overlay_surface, pady=4)
-            item.pack(fill=X)
-            if index:
-                Canvas(item, height=1, bg=theme.overlay_border, highlightthickness=0).pack(fill=X, pady=(0, 6))
-            body = Frame(item, bg=theme.overlay_surface)
-            body.pack(fill=X)
-            name_box = Frame(body, bg=theme.overlay_surface)
-            name_box.pack(side=LEFT, fill=X, expand=True)
-            Label(
-                name_box,
-                text=row_data.item_name,
-                fg=theme.overlay_text,
-                bg=theme.overlay_surface,
-                font=("Microsoft YaHei UI", 13, "bold"),
-                anchor="w",
-            ).pack(anchor="w")
-            subtitle = f"{row_data.source}  {self._format_time(row_data.latest_at)}"
-            Label(name_box, text=subtitle, fg=theme.overlay_muted, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(1, 0))
             amount = display_amount_for_item(
                 row_data.item_name, row_data.latest_amount, row_data.latest_currency, target_currency, rate, chaos_per_divine
             )
             price_text = f"{self._format_amount(amount)} {target_currency}"
-            price_box = Frame(body, bg=theme.overlay_surface)
-            price_box.pack(side=RIGHT, padx=(16, 0))
-            self._render_rating_controls(
-                price_box,
-                row_data.realtime_record_id,
-                row_data.source,
-                theme.overlay_surface,
-                size=19,
-                upvotes=row_data.realtime_upvotes,
+            style = self._overlay_result_style("normal")
+            item = self._render_overlay_market_result_row(
+                self.focus_search_results,
+                index=index,
+                row_data=row_data,
+                price_text=price_text,
+                trend=row_data.trend_percent,
+                content_width=content_width,
+                rating_size=int(style["rating_size"]),
+                price_kind="normal",
+                name_font_delta=int(style["name_font_delta"]),
+                price_font_delta=int(style["price_font_delta"]),
+                trend_font_delta=int(style["trend_font_delta"]),
+                separator_pad=style["separator_pad"],  # type: ignore[arg-type]
+                row_pady=int(style["row_pady"]),
             )
-            Label(price_box, text=price_text, fg=theme.overlay_accent, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor="e")
-            trend_color = theme.success if row_data.trend_percent.startswith("+") else theme.danger if row_data.trend_percent.startswith("-") else theme.overlay_muted
-            Label(price_box, text=f"趋势 {row_data.trend_percent or '暂无'}", fg=trend_color, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 9)).pack(anchor="e")
             self._bind_focus_result_click_recursive(item, row_data.item_name)
         visible_rows = min(len(rows), 5)
         result_height = self._measure_focus_result_height(visible_rows)
         self._configure_focus_result_scroll(result_height, len(rows) > 5)
-        self._position_focus_search_overlay(96 + result_height)
+        self._position_focus_search_overlay(self._focus_search_base_height() + result_height)
 
     def _measure_focus_result_height(self, visible_rows: int) -> int:
+        row_height = self._scaled(48, 46, 76)
         if self.focus_search_results is None:
-            return max(1, visible_rows) * 64
+            return max(1, visible_rows) * row_height
         try:
             self.focus_search_results.update_idletasks()
             children = self.focus_search_results.winfo_children()[:visible_rows]
             measured = sum(max(child.winfo_reqheight(), child.winfo_height()) for child in children)
         except Exception:
             measured = 0
-        return max(max(1, visible_rows) * 64, measured + 6)
+        return max(max(1, visible_rows) * row_height, measured + self._overlay_result_bottom_padding())
 
     def _configure_focus_result_scroll(self, height: int, scrollable: bool) -> None:
         canvas = self.focus_search_results_canvas
@@ -5516,7 +6698,7 @@ class PriceTrackerApp:
             ]
         except Exception:
             values = [float(getattr(record, "amount", 0.0)) for record in history]
-        return trend_percent(values)
+        return trend_percent(recent_trend_values(history, values))
 
     def _cursor_screen_position(self) -> tuple[int, int]:
         try:
@@ -5560,8 +6742,23 @@ class PriceTrackerApp:
             pointer_is_inside = screen_left <= pointer_x <= screen_right and screen_top <= pointer_y <= screen_bottom
             pointer_is_empty_fallback = pointer_x == 0 and pointer_y == 0
             if pointer_is_inside and not pointer_is_empty_fallback:
-                x = max(screen_left + margin, min(pointer_x + margin, max_x))
-                y = max(screen_top + margin, min(pointer_y + margin, max_y))
+                right_x = pointer_x + margin
+                left_x = pointer_x - width - margin
+                if right_x <= max_x:
+                    x = right_x
+                elif left_x >= screen_left + margin:
+                    x = left_x
+                else:
+                    x = max(screen_left + margin, min(right_x, max_x))
+
+                lower_y = pointer_y + margin
+                upper_y = pointer_y - height - margin
+                if lower_y <= max_y:
+                    y = lower_y
+                elif upper_y >= screen_top + margin:
+                    y = upper_y
+                else:
+                    y = max(screen_top + margin, min(lower_y, max_y))
                 return x, y
 
         screen_width = max(1, screen_right - screen_left)
@@ -5618,10 +6815,18 @@ class PriceTrackerApp:
         rating_source: str = "",
         rating_upvotes: int = 0,
     ) -> None:
-        width, min_height = 460, 260
+        width = self._scaled(460, 460, 620)
+        min_height = self._scaled(260, 260, 360)
+        pointer = self._quick_price_anchor or self._cursor_screen_position()
+        monitor_bounds = self._monitor_work_area_for_point(pointer) if pointer is not None else None
+        screen_left, screen_top, screen_right, screen_bottom = monitor_bounds or self._virtual_screen_bounds(self.root)
+        available_width = max(300, screen_right - screen_left - 48)
+        available_height = max(180, screen_bottom - screen_top - 48)
+        width = min(width, available_width)
+        min_height = min(min_height, available_height)
         theme = self.theme
         card_bg = theme.overlay_surface
-        trend_color = theme.success if trend.startswith("+") else theme.danger if trend.startswith("-") else theme.overlay_muted
+        trend_color = self._overlay_trend_color(trend)
         overlay = self.quick_price_overlay
         if overlay is None or not self._toplevel_exists(overlay):
             overlay = Toplevel(self.root)
@@ -5633,20 +6838,27 @@ class PriceTrackerApp:
             overlay.overrideredirect(True)
             overlay.attributes("-topmost", True)
             try:
-                overlay.attributes("-alpha", 0.92)
+                overlay.attributes("-alpha", 0.96 if not theme.is_dark else 0.94)
             except Exception:
                 pass
             overlay.configure(bg=card_bg)
             overlay.bind("<Escape>", lambda _event: self._destroy_quick_price_overlay())
 
-            frame = Frame(overlay, bg=card_bg, padx=22, pady=20)
+            frame = Frame(
+                overlay,
+                bg=card_bg,
+                padx=self._scaled(22, 22, 32),
+                pady=self._scaled(20, 20, 30),
+                highlightthickness=1,
+                highlightbackground=theme.overlay_border,
+            )
             frame.pack(fill=BOTH, expand=True)
-            content_width = width - 56
+            content_width = width - self._scaled(56, 56, 86)
             subtitle_label = Label(
                 frame,
                 fg=theme.overlay_muted,
                 bg=card_bg,
-                font=("Microsoft YaHei UI", 11),
+                font=self._ui_font(-4),
                 wraplength=content_width,
                 justify=LEFT,
             )
@@ -5655,42 +6867,47 @@ class PriceTrackerApp:
                 frame,
                 fg=theme.overlay_text,
                 bg=card_bg,
-                font=("Microsoft YaHei UI", 18, "bold"),
+                font=self._ui_font(3, "bold"),
                 wraplength=content_width,
                 justify=LEFT,
             )
-            title_label.pack(anchor="w", pady=(8, 12))
+            title_label.pack(anchor="w", pady=(self._scaled(8, 8, 14), self._scaled(12, 12, 18)))
             price_row = Frame(frame, bg=card_bg)
             price_row.pack(fill=X)
             price_label = Label(
                 price_row,
-                fg=theme.overlay_accent,
+                fg=self._overlay_price_color(),
                 bg=card_bg,
-                font=("Microsoft YaHei UI", 22, "bold"),
-                wraplength=content_width - 100,
+                font=self._ui_font(6, "bold"),
+                wraplength=content_width - self._scaled(100, 100, 150),
+                anchor="w",
                 justify=LEFT,
             )
+            price_label._preserve_theme_fg = True  # type: ignore[attr-defined]
+            price_label._overlay_value_label = "price"  # type: ignore[attr-defined]
             price_label.pack(side=LEFT, anchor="w", fill=X, expand=True)
-            rating_frame = Frame(price_row, bg=card_bg)
-            rating_frame.pack(side=RIGHT, padx=(12, 0))
+            rating_frame = Frame(price_row, bg=card_bg, bd=0, highlightthickness=0)
+            rating_frame.pack(side=RIGHT, padx=(self._scaled(12, 12, 20), 0))
             trend_label = Label(
                 frame,
                 bg=card_bg,
-                font=("Microsoft YaHei UI", 13, "bold"),
+                font=self._ui_font(-1, "bold"),
                 wraplength=content_width,
                 justify=LEFT,
             )
-            trend_label.pack(anchor="w", pady=(14, 0))
+            trend_label._preserve_theme_fg = True  # type: ignore[attr-defined]
+            trend_label._overlay_value_label = "trend"  # type: ignore[attr-defined]
+            trend_label.pack(anchor="w", pady=(self._scaled(14, 14, 22), 0))
             hint_label = Label(
                 frame,
                 text="点击或 Esc 关闭，5 秒后自动隐藏",
                 fg=theme.subtle,
                 bg=card_bg,
-                font=("Microsoft YaHei UI", 10),
+                font=self._ui_font(-5),
                 wraplength=content_width,
                 justify=RIGHT,
             )
-            hint_label.pack(anchor="e", pady=(12, 0))
+            hint_label.pack(anchor="e", pady=(self._scaled(12, 12, 18), 0))
             self.quick_price_overlay_labels = {
                 "frame": frame,
                 "subtitle": subtitle_label,
@@ -5702,6 +6919,14 @@ class PriceTrackerApp:
             self._bind_destroy_on_click_recursive(overlay, overlay)
 
         labels = self.quick_price_overlay_labels
+        content_width = width - self._scaled(56, 56, 86)
+        try:
+            labels["subtitle"].configure(font=self._ui_font(-4), wraplength=content_width)
+            labels["title"].configure(font=self._ui_font(3, "bold"), wraplength=content_width)
+            labels["price"].configure(font=self._ui_font(6, "bold"), wraplength=content_width - self._scaled(100, 100, 150), anchor="w")
+            labels["trend"].configure(font=self._ui_font(-1, "bold"), wraplength=content_width)
+        except Exception:
+            pass
         for key in ("frame", "rating"):
             widget = labels.get(key)
             if widget is not None:
@@ -5712,7 +6937,7 @@ class PriceTrackerApp:
         for key, fg in {
             "subtitle": theme.overlay_muted,
             "title": theme.overlay_text,
-            "price": theme.overlay_accent,
+            "price": self._overlay_price_color(),
             "trend": trend_color,
         }.items():
             widget = labels.get(key)
@@ -5734,16 +6959,14 @@ class PriceTrackerApp:
                 rating_record_id,
                 rating_source,
                 card_bg,
-                size=24,
+                size=self._scaled(24, 22, 32),
                 upvotes=rating_upvotes,
-                force_text_icon=True,
             )
         overlay.update_idletasks()
         frame = labels.get("frame")
         requested_height = frame.winfo_reqheight() + 8 if frame is not None else min_height
-        height = max(min_height, min(380, requested_height))
-        pointer = self._quick_price_anchor or self._cursor_screen_position()
-        screen_left, screen_top, screen_right, screen_bottom = self._virtual_screen_bounds(overlay)
+        desired_max_height = min(self._scaled(420, 380, 620), available_height)
+        height = min(available_height, max(min_height, min(desired_max_height, requested_height)))
         x, y = self._quick_price_overlay_position(pointer, (screen_left, screen_top, screen_right, screen_bottom), width, height)
         self._position_toplevel_absolute(overlay, x, y, width, height)
         try:
@@ -5767,7 +6990,19 @@ class PriceTrackerApp:
 
     def _reposition_quick_price_overlay_once(self, overlay: Toplevel, x: int, y: int, width: int, height: int) -> None:
         if overlay is self.quick_price_overlay and self._toplevel_exists(overlay):
-            self._position_toplevel_absolute(overlay, x, y, width, height)
+            pointer = self._quick_price_anchor or self._cursor_screen_position()
+            monitor_bounds = self._monitor_work_area_for_point(pointer) if pointer is not None else None
+            bounds = monitor_bounds or self._virtual_screen_bounds(overlay)
+            try:
+                actual_width = max(width, int(overlay.winfo_reqwidth()), int(overlay.winfo_width()))
+                actual_height = max(height, int(overlay.winfo_reqheight()), int(overlay.winfo_height()))
+            except Exception:
+                actual_width, actual_height = width, height
+            left, top, right, bottom = bounds
+            actual_width = min(actual_width, max(300, right - left - 48))
+            actual_height = min(actual_height, max(180, bottom - top - 48))
+            x, y = self._quick_price_overlay_position(pointer, bounds, actual_width, actual_height)
+            self._position_toplevel_absolute(overlay, x, y, actual_width, actual_height)
 
     @staticmethod
     def _toplevel_exists(window: Toplevel) -> bool:
@@ -5860,10 +7095,20 @@ class PriceTrackerApp:
         except Exception:
             pass
         theme = self.theme
+        base_size = self._global_font_size()
+        overlay_width = self._realtime_import_width()
+        content_width = overlay_width - self._scaled(100, 100, 150)
         overlay.configure(bg=theme.overlay_bg)
         overlay.bind("<Escape>", lambda _event: self.destroy_realtime_import_overlay())
-        frame = Frame(overlay, bg=theme.overlay_surface, padx=22, pady=18, highlightthickness=1, highlightbackground=theme.overlay_border)
-        frame.pack(fill=BOTH, expand=True, padx=12, pady=12)
+        frame = Frame(
+            overlay,
+            bg=theme.overlay_surface,
+            padx=self._scaled(22, 22, 34),
+            pady=self._scaled(18, 18, 28),
+            highlightthickness=1,
+            highlightbackground=theme.overlay_border,
+        )
+        frame.pack(fill=BOTH, expand=True, padx=self._scaled(6, 6, 10), pady=self._scaled(6, 6, 10))
         header = Frame(frame, bg=theme.overlay_surface)
         header.pack(fill=X)
         Label(
@@ -5871,7 +7116,7 @@ class PriceTrackerApp:
             text="实时价格导入",
             fg=theme.overlay_text,
             bg=theme.overlay_surface,
-            font=("Microsoft YaHei UI", 16, "bold"),
+            font=self._ui_font(1, "bold"),
         ).pack(side=LEFT)
         submit = Button(header, text="提交记录", command=lambda: self.save_market_exchange_record(show_message=False))
         submit.pack(side=RIGHT)
@@ -5880,9 +7125,9 @@ class PriceTrackerApp:
             text="等待识别",
             fg=theme.primary,
             bg=theme.surface_alt,
-            font=("Microsoft YaHei UI", 10, "bold"),
-            padx=10,
-            pady=4,
+            font=self._ui_font(-5, "bold"),
+            padx=self._scaled(10, 10, 16),
+            pady=self._scaled(4, 4, 8),
         )
         state.configure(cursor="hand2")
         state.bind("<Button-1>", lambda _event: self.confirm_realtime_import_result(), add="+")
@@ -5893,24 +7138,26 @@ class PriceTrackerApp:
             text="确认识别结果后提交。只允许修正物品名和买入/卖出方向，价格比例由截图自动计算。",
             fg=theme.overlay_muted,
             bg=theme.overlay_surface,
-            font=("Microsoft YaHei UI", 10),
+            font=self._ui_font(-4),
             anchor="w",
+            wraplength=content_width,
         )
-        hint.pack(fill=X, pady=(8, 12))
+        hint.pack(fill=X, pady=(self._scaled(8, 8, 14), self._scaled(12, 12, 18)))
 
         table = Frame(frame, bg=theme.overlay_border)
         table.pack(fill=X)
         table.columnconfigure(1, weight=1)
         for row_index in range(1, 5):
-            table.rowconfigure(row_index, minsize=46)
+            table.rowconfigure(row_index, minsize=self._scaled(46, 46, 70))
         combo_style = ttk.Style()
         combo_style.configure(
             "RealtimeImport.TCombobox",
-            padding=(8, 4, 8, 4),
+            padding=(self._scaled(8, 8, 12), self._scaled(4, 4, 8), self._scaled(8, 8, 12), self._scaled(4, 4, 8)),
             fieldbackground=theme.input_bg,
             background=theme.input_bg,
             foreground=theme.text,
-            arrowsize=14,
+            arrowsize=max(14, base_size),
+            font=self._ui_font(-3),
         )
         headers = ("字段", "识别结果", "说明")
         for col, text in enumerate(headers):
@@ -5919,9 +7166,9 @@ class PriceTrackerApp:
                 text=text,
                 fg=theme.muted,
                 bg=theme.surface_alt,
-                font=("Microsoft YaHei UI", 10, "bold"),
-                padx=10,
-                pady=8,
+                font=self._ui_font(-4, "bold"),
+                padx=self._scaled(10, 10, 16),
+                pady=self._scaled(8, 8, 12),
                 anchor="w",
             ).grid(row=0, column=col, sticky="nsew", padx=(0 if col == 0 else 1, 0), pady=(0, 1))
 
@@ -5931,9 +7178,9 @@ class PriceTrackerApp:
                 text=text,
                 fg=theme.text,
                 bg=theme.card,
-                font=("Microsoft YaHei UI", 11),
-                padx=10,
-                pady=9,
+                font=self._ui_font(-3),
+                padx=self._scaled(10, 10, 16),
+                pady=self._scaled(9, 9, 14),
                 anchor="w",
                 width=8,
             ).grid(row=row, column=0, sticky="nsew", pady=(0, 1))
@@ -5944,17 +7191,17 @@ class PriceTrackerApp:
                 text=text,
                 fg=theme.muted,
                 bg=theme.card,
-                font=("Microsoft YaHei UI", 10),
-                padx=10,
-                pady=9,
+                font=self._ui_font(-5),
+                padx=self._scaled(10, 10, 16),
+                pady=self._scaled(9, 9, 14),
                 anchor="w",
-                width=16,
+                width=18,
             )
             label.grid(row=row, column=2, sticky="nsew", padx=(1, 0), pady=(0, 1))
             return label
 
         def input_cell(row: int) -> Frame:
-            cell = Frame(table, bg=theme.card, padx=10, pady=5)
+            cell = Frame(table, bg=theme.card, padx=self._scaled(10, 10, 16), pady=self._scaled(5, 5, 9))
             cell.grid(row=row, column=1, sticky="nsew", padx=(1, 0), pady=(0, 1))
             cell.columnconfigure(0, weight=1)
             return cell
@@ -5991,33 +7238,61 @@ class PriceTrackerApp:
             text="",
             fg=theme.overlay_muted,
             bg=theme.overlay_surface,
-            font=("Microsoft YaHei UI", 10),
+            font=self._ui_font(-4),
             anchor="w",
             justify=LEFT,
-            wraplength=620,
-            height=2,
+            wraplength=content_width,
         )
-        message.pack(fill=X, pady=(10, 0))
+        message.pack(fill=X, pady=(self._scaled(10, 10, 16), 0))
         current_price_row = Frame(frame, bg=theme.overlay_surface)
         current_price_row.pack(fill=X, pady=(6, 0))
-        current_price = Label(
-            current_price_row,
+        current_price = Frame(current_price_row, bg=theme.overlay_surface)
+        current_price.pack(side=LEFT, fill=X, expand=True)
+        current_price_main = Label(
+            current_price,
             text="当前记录：等待识别",
-            fg=theme.overlay_text,
+            fg=theme.overlay_muted,
             bg=theme.overlay_surface,
-            font=("Microsoft YaHei UI", 10, "bold"),
+            font=self._ui_font(-4, "bold"),
             anchor="w",
             justify=LEFT,
-            wraplength=620,
-            height=2,
+            wraplength=content_width - self._scaled(120, 120, 170),
         )
-        current_price.pack(side=LEFT, fill=X, expand=True)
+        current_price_main._preserve_theme_fg = True  # type: ignore[attr-defined]
+        current_price_main._overlay_value_label = "price"  # type: ignore[attr-defined]
+        current_price_main.pack(anchor="w", fill=X)
+        current_price_trend = Label(
+            current_price,
+            text="",
+            fg=theme.overlay_muted,
+            bg=theme.overlay_surface,
+            font=self._ui_font(-5, "bold"),
+            anchor="w",
+            justify=LEFT,
+        )
+        current_price_trend._preserve_theme_fg = True  # type: ignore[attr-defined]
+        current_price_trend._overlay_value_label = "trend"  # type: ignore[attr-defined]
+        current_price_trend.pack(anchor="w", pady=(self._scaled(2, 2, 4), 0))
+        current_price_meta = Label(
+            current_price,
+            text="",
+            fg=theme.overlay_muted,
+            bg=theme.overlay_surface,
+            font=self._ui_font(-6),
+            anchor="w",
+            justify=LEFT,
+            wraplength=content_width - self._scaled(120, 120, 170),
+        )
+        current_price_meta.pack(anchor="w", pady=(self._scaled(1, 1, 3), 0), fill=X)
         current_rating = Frame(current_price_row, bg=theme.overlay_surface)
-        current_rating.pack(side=RIGHT, padx=(8, 0))
+        current_rating_size = self._scaled(20, 18, 28)
+        current_rating.configure(
+            width=self._rating_slot_width(current_rating_size),
+            height=self._rating_slot_height(current_rating_size),
+        )
+        current_rating.pack_propagate(False)
+        current_rating.pack(side=RIGHT, padx=(self._scaled(8, 8, 14), 0))
 
-        buttons = Frame(frame, bg=theme.overlay_surface)
-        buttons.pack(fill=X, side="bottom", pady=(8, 0))
-        Button(buttons, text="关闭", command=self.destroy_realtime_import_overlay).pack(side=RIGHT)
         self.realtime_import_labels = {
             "state": state,
             "hint": hint,
@@ -6027,31 +7302,49 @@ class PriceTrackerApp:
             "currency_note": currency_note,
             "message": message,
             "current_price": current_price,
+            "current_price_main": current_price_main,
+            "current_price_trend": current_price_trend,
+            "current_price_meta": current_price_meta,
             "current_rating": current_rating,
             "submit": submit,
             "item_entry": item_entry,
             "side_combo": side_combo,
             "amount_entry": amount_entry,
             "currency_entry": currency_entry,
+            "frame": frame,
         }
-        item_entry.bind("<KeyRelease>", lambda _event: self._mark_realtime_import_pending(), add="+")
-        item_entry.bind("<KeyRelease>", lambda _event: self._update_realtime_current_price_label(), add="+")
+        item_entry.bind("<KeyRelease>", lambda _event: self._on_realtime_import_item_edited(), add="+")
         side_combo.bind("<<ComboboxSelected>>", lambda _event: self._mark_realtime_import_pending(), add="+")
         self._bind_realtime_import_drag_recursive(frame)
         self._position_realtime_import_overlay()
         return overlay
 
-    def _position_realtime_import_overlay(self, width: int = 720, height: int = 470) -> None:
+    def _realtime_import_width(self) -> int:
+        return self._scaled(720, 720, 960)
+
+    def _position_realtime_import_overlay(self, width: int | None = None, height: int | None = None) -> None:
         overlay = self.realtime_import_overlay
         if overlay is None:
             return
         screen_width = overlay.winfo_screenwidth()
         screen_height = overlay.winfo_screenheight()
+        width = width or self._realtime_import_width()
+        width = min(width, max(520, screen_width - 48))
+        if height is None:
+            frame = self.realtime_import_labels.get("frame") if self.realtime_import_labels else None
+            try:
+                overlay.update_idletasks()
+                requested = frame.winfo_reqheight() + self._scaled(28, 28, 44) if frame is not None else 0
+            except Exception:
+                requested = 0
+            height = max(self._scaled(470, 470, 660), min(self._scaled(700, 620, 900), requested or self._scaled(470, 470, 660)))
+        height = min(height, max(360, screen_height - 48))
         x = max(24, int((screen_width - width) / 2))
         y = max(24, int(screen_height * (1 - 0.618)) - int(height / 2))
         overlay.geometry(f"{width}x{height}+{x}+{y}")
 
     def show_realtime_import_loading(self) -> None:
+        self._cancel_realtime_import_name_validation()
         overlay = self._ensure_realtime_import_overlay()
         labels = self.realtime_import_labels
         self.realtime_item_var.set("")
@@ -6067,7 +7360,7 @@ class PriceTrackerApp:
         labels["amount_note"].configure(text="等待结果")
         labels["currency_note"].configure(text="等待结果")
         labels["message"].configure(text="识别完成后可确认提交；价格和单位会按市场比例自动计算。")
-        labels["current_price"].configure(text="当前记录：等待识别")
+        self._set_realtime_current_price_labels("当前记录：等待识别")
         self._clear_realtime_current_rating()
         labels["submit"].configure(state="disabled")
         self._position_realtime_import_overlay()
@@ -6085,7 +7378,7 @@ class PriceTrackerApp:
             labels["amount_note"].configure(text="未识别")
             labels["currency_note"].configure(text="未识别")
             labels["message"].configure(text="价格比例不允许手动填写。请重新截图，包含左右两侧物品和比例。")
-            labels["current_price"].configure(text="当前记录：未查询")
+            self._set_realtime_current_price_labels("当前记录：未查询")
             self._clear_realtime_current_rating()
             self._mark_realtime_import_pending()
         else:
@@ -6115,6 +7408,35 @@ class PriceTrackerApp:
             state.configure(text="待确认", fg=theme.warning, bg=theme.surface_alt, cursor="hand2")
         self._update_realtime_import_submit_state()
 
+    def _on_realtime_import_item_edited(self) -> None:
+        self._mark_realtime_import_pending()
+        self._schedule_realtime_import_name_validation()
+
+    def _cancel_realtime_import_name_validation(self) -> None:
+        job = getattr(self, "realtime_import_name_validation_job", None)
+        if job is None:
+            return
+        try:
+            self.root.after_cancel(job)
+        except Exception:
+            pass
+        self.realtime_import_name_validation_job = None
+
+    def _schedule_realtime_import_name_validation(self) -> None:
+        self._cancel_realtime_import_name_validation()
+        try:
+            self.realtime_import_name_validation_job = self.root.after(
+                350,
+                self._validate_realtime_import_name_later,
+            )
+        except Exception:
+            self._validate_realtime_import_name_later()
+
+    def _validate_realtime_import_name_later(self) -> None:
+        self.realtime_import_name_validation_job = None
+        self._update_realtime_import_submit_state(update_message=True)
+        self._update_realtime_current_price_label()
+
     def confirm_realtime_import_result(self) -> None:
         if not self.realtime_import_labels:
             return
@@ -6125,7 +7447,7 @@ class PriceTrackerApp:
             state.configure(text="已确认", fg=theme.success, bg=theme.surface_alt, cursor="hand2")
         self._update_realtime_import_submit_state()
 
-    def _update_realtime_import_submit_state(self) -> None:
+    def _update_realtime_import_submit_state(self, update_message: bool = False) -> None:
         labels = self.realtime_import_labels
         submit = labels.get("submit")
         if submit is None:
@@ -6133,12 +7455,35 @@ class PriceTrackerApp:
         item_name = self.realtime_item_var.get().strip()
         amount = float(self.realtime_price_parsed.amount or 0)
         currency = self.realtime_price_parsed.currency.strip()
+        valid_name, name_message = self._validate_realtime_item_name_edit(item_name)
         enabled = (
             self.realtime_import_confirmed
             and bool(item_name)
+            and valid_name
             and amount > 0
             and bool(currency)
         )
+        if update_message:
+            message = labels.get("message")
+            item_note = labels.get("item_note")
+            hint = labels.get("hint")
+            if not item_name:
+                if item_note is not None:
+                    item_note.configure(text="需要填写")
+                if message is not None:
+                    message.configure(text="请填写物品名；价格比例仍由截图自动计算。")
+            elif not valid_name:
+                if item_note is not None:
+                    item_note.configure(text="修改过多")
+                if hint is not None:
+                    hint.configure(text="只允许小范围修正物品名和交易方向，价格比例不允许手动修改。")
+                if message is not None:
+                    message.configure(text=name_message)
+            else:
+                if item_note is not None:
+                    item_note.configure(text="可提交" if self.realtime_import_confirmed else "请确认")
+                if message is not None:
+                    message.configure(text="物品名校验通过。请确认识别结果后提交。")
         try:
             submit.configure(state="normal" if enabled else "disabled")
         except Exception:
@@ -6146,13 +7491,12 @@ class PriceTrackerApp:
 
     def _update_realtime_current_price_label(self) -> None:
         labels = self.realtime_import_labels
-        label = labels.get("current_price")
-        self._clear_realtime_current_rating()
-        if label is None:
+        if not labels.get("current_price"):
             return
+        self._clear_realtime_current_rating()
         item_name = self.realtime_item_var.get().strip()
         if not item_name:
-            label.configure(text="当前记录：未查询")
+            self._set_realtime_current_price_labels("当前记录：未查询")
             return
         target_currency = self._realtime_current_price_target_currency()
         item_currency = canonical_currency(item_name)
@@ -6165,12 +7509,12 @@ class PriceTrackerApp:
                 min_realtime_upvotes=self._realtime_min_upvotes(),
             )
             if stats is None:
-                label.configure(text="当前兑换：本地暂无兑换比例")
+                self._set_realtime_current_price_labels("当前兑换：本地暂无兑换比例")
                 return
         else:
             stats = self.db.get_stats(item_name, min_realtime_upvotes=self._realtime_min_upvotes())
             if stats is None:
-                label.configure(text="当前记录：本地暂无价格")
+                self._set_realtime_current_price_labels("当前记录：本地暂无价格")
                 return
         rate = self.db.get_exalted_per_divine()
         chaos_per_divine = self.db.get_chaos_per_divine()
@@ -6193,22 +7537,30 @@ class PriceTrackerApp:
             trend = self._base_currency_pair_trend_percent(item_currency, target_currency)
         else:
             trend = self._stats_trend_percent(stats.item_name, target_currency)
-        parts = [f"{prefix}：{self._format_amount(amount)} {target_currency}", f"趋势：{trend or '暂无'}", f"来源：{source}"]
+        meta_parts = [f"来源：{source}"]
         if updated:
-            parts.append(updated)
-        label.configure(text=" · ".join(parts))
+            meta_parts.append(updated)
+        self._set_realtime_current_price_labels(
+            f"{prefix}：{self._format_amount(amount)} {target_currency}",
+            f"趋势：{trend or '暂无'}",
+            " · ".join(meta_parts),
+            main_color=self._overlay_price_color(),
+            trend_color=self._overlay_trend_color(trend),
+        )
         rating_holder = labels.get("current_rating")
         if rating_holder is not None:
             self._render_rating_controls(
                 rating_holder,
                 stats.realtime_record_id,
                 stats.latest_source,
-                "#ffffff",
-                size=20,
+                self.theme.overlay_surface,
+                size=self._scaled(20, 18, 30),
                 upvotes=stats.realtime_upvotes,
+                reserve_space=True,
             )
 
     def destroy_realtime_import_overlay(self) -> None:
+        self._cancel_realtime_import_name_validation()
         overlay = self.realtime_import_overlay
         self.realtime_import_overlay = None
         self.realtime_import_labels = {}
@@ -6452,19 +7804,17 @@ class PriceTrackerApp:
             self._restore_process_priority(previous_priority)
             previous_priority = None
             worker_db = PriceDatabase(self.config.database_path)
-            rows = recognize_structured_prices(ocr_path, result, db=worker_db, default_currency="崇高石")
-            if not rows:
-                rows = parse_item_price_rows(result.text, default_currency="崇高石")
-            candidates = self._screenshot_lookup_candidates(ocr_path, result, rows, worker_db)
+            rows: list[ParsedItemPrice] = []
+            candidates = self._screenshot_lookup_candidates(ocr_path, result, worker_db)
             lookup_rows = self._market_rows_for_candidates(candidates, worker_db)
-            if not rows:
-                message = result.message or "没有识别到价格列表。请尝试框得更紧一些，或在配置中检查截图识别功能。"
+            if not lookup_rows:
+                message = result.message or "没有识别到可查价物品。请尽量框选包含物品名称的区域。"
             else:
                 message = ""
             self._post_event(
                 (
                     "screenshot_lookup_done",
-                    bool(rows),
+                    bool(lookup_rows),
                     rows,
                     lookup_rows,
                     result.text,
@@ -6483,22 +7833,9 @@ class PriceTrackerApp:
         self,
         crop_path: Path,
         result,
-        rows: list[ParsedItemPrice],
         db: PriceDatabase,
     ) -> list[RecognizedItemCandidate]:
-        candidates: list[RecognizedItemCandidate] = []
-        for row in rows:
-            confidence = self._ocr_row_confidence(row)
-            candidates.append(
-                RecognizedItemCandidate(
-                    item_name=row.item_name,
-                    raw_text=row.raw_text,
-                    confidence=confidence,
-                    item_match_score=row.item_match_score,
-                )
-            )
-        candidates.extend(recognize_item_candidates(crop_path, result, db=db, min_score=0.62))
-        return candidates
+        return recognize_item_candidates(crop_path, result, db=db, min_score=0.62)
 
     def _market_rows_for_candidates(
         self,
@@ -6647,13 +7984,55 @@ class PriceTrackerApp:
         )
 
     def _show_overlay_text(self, text: str) -> None:
+        theme = self.theme
         overlay = Toplevel(self.root)
         overlay.title("价格")
         overlay.attributes("-topmost", True)
         overlay.geometry("+80+80")
-        frame = Frame(overlay, padx=14, pady=12, bg="#111")
+        frame = Frame(
+            overlay,
+            padx=self._scaled(16, 16, 24),
+            pady=self._scaled(14, 14, 22),
+            bg=theme.overlay_surface,
+            highlightthickness=1,
+            highlightbackground=theme.overlay_border,
+        )
         frame.pack(fill=BOTH, expand=True)
-        Label(frame, text=text, justify=LEFT, fg="#f4f4f4", bg="#111").pack()
+        lines = str(text or "").splitlines()
+        if lines:
+            Label(
+                frame,
+                text=lines[0],
+                justify=LEFT,
+                anchor="w",
+                fg=theme.overlay_text,
+                bg=theme.overlay_surface,
+                font=self._ui_font(0, "bold"),
+            ).pack(anchor="w")
+        for index, line in enumerate(lines[1:], start=1):
+            is_price_line = line.startswith("最新") or line.startswith("均价") or any(unit in line for unit in ("神圣石", "崇高石", "混沌石"))
+            is_trend_line = line.startswith("趋势")
+            if is_trend_line:
+                trend_value = line.split("：", 1)[1] if "：" in line else line
+                fg = self._overlay_trend_color(trend_value)
+            else:
+                fg = self._overlay_price_color() if is_price_line else theme.overlay_muted
+            label = Label(
+                frame,
+                text=line,
+                justify=LEFT,
+                anchor="w",
+                fg=fg,
+                bg=theme.overlay_surface,
+                font=self._ui_font(-1 if is_price_line or is_trend_line else -3, "bold" if is_price_line or is_trend_line else "normal"),
+            )
+            if is_price_line:
+                label._preserve_theme_fg = True  # type: ignore[attr-defined]
+                label._overlay_value_label = "price"  # type: ignore[attr-defined]
+            elif is_trend_line:
+                label._preserve_theme_fg = True  # type: ignore[attr-defined]
+                label._overlay_value_label = "trend"  # type: ignore[attr-defined]
+            label.pack(anchor="w", pady=(self._scaled(5, 4, 8) if index == 1 else self._scaled(2, 2, 4), 0))
         overlay.after(5000, overlay.destroy)
 
     def open_settings(self) -> None:
@@ -6891,7 +8270,7 @@ class PriceTrackerApp:
         if not self.realtime_sync_client.can_read():
             messagebox.showinfo(
                 "未配置实时同步",
-                "还没有配置实时价格同步服务。请先在本机安全配置中保存 Redis 地址和读取密钥。",
+                "还没有配置实时价格同步服务。请先在配置页填写共享服务地址并保存。",
             )
             return
         if not self._consume_realtime_sync_permission():
@@ -7161,32 +8540,45 @@ def _acquire_single_instance() -> bool:
     return True
 
 
+def _terminate_startup_failure(root: Tk | None = None, exit_code: int = 1) -> None:
+    if root is not None:
+        try:
+            root.quit()
+        except Exception:
+            pass
+        try:
+            root.destroy()
+        except Exception:
+            pass
+    os._exit(int(exit_code))
+
+
 def main() -> None:
-    if not _acquire_single_instance():
-        sys.exit(0)
-    _enable_dpi_awareness()
-    if tb is not None:
-        root = tb.Window(themename="flatly")
-    else:
-        root = Tk()
+    root: Tk | None = None
     try:
-        root.withdraw()
+        _enable_dpi_awareness()
+        if not _acquire_single_instance():
+            sys.exit(0)
+        if tb is not None:
+            root = tb.Window(themename="flatly")
+        else:
+            root = Tk()
+        try:
+            root.withdraw()
+        except Exception:
+            pass
+        if not _preflight_user_data(root):
+            _terminate_startup_failure(root, 1)
+        try:
+            app = PriceTrackerApp(root)
+        except Exception:
+            _terminate_startup_failure(root, 1)
+        root.mainloop()
+    except SystemExit:
+        raise
     except Exception:
-        pass
-    if not _preflight_user_data(root):
-        try:
-            root.destroy()
-        finally:
-            sys.exit(1)
-    try:
-        app = PriceTrackerApp(root)
-    except Exception as exc:
-        messagebox.showerror("启动失败", f"程序初始化失败：{exc}", parent=root)
-        try:
-            root.destroy()
-        finally:
-            sys.exit(1)
-    root.mainloop()
+        _terminate_startup_failure(root, 1)
 
 
 __all__ = ["main", "PriceTrackerApp"]
+

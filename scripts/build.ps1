@@ -3,6 +3,8 @@ param(
     [string[]]$PythonArgs = @("-3.12"),
     [string]$AppName = "PoE2PriceTracker",
     [string]$Version = "",
+    [string]$Suffix = "",
+    [switch]$Test,
     [switch]$OneFile
 )
 
@@ -17,7 +19,22 @@ if (-not $Version) {
     }
 }
 $OneFile = $true
+
+function ConvertTo-SafeNamePart {
+    param([string]$Value)
+    $Safe = ($Value.Trim() -replace '^[\s\-_]+', '' -replace '[\\/:*?"<>|\s]+', '-').Trim("-_.")
+    return $Safe
+}
+
+if ($Test -and -not $Suffix.Trim()) {
+    $Suffix = "test"
+}
+
+$SafeSuffix = ConvertTo-SafeNamePart $Suffix
 $BuildName = if ($Version) { "$AppName-$Version" } else { $AppName }
+if ($SafeSuffix) {
+    $BuildName = "$BuildName-$SafeSuffix"
+}
 
 function Invoke-Checked {
     param([string]$Exe, [string[]]$ArgList)
@@ -115,4 +132,8 @@ if (Test-Path $StaticBundle) {
 Invoke-Checked $BuildPython $PyInstallerArgs
 
 $BuiltPath = Join-Path $Root "dist\$BuildName.exe"
+$SpecPath = Join-Path $Root "$BuildName.spec"
+if (Test-Path -LiteralPath $SpecPath) {
+    Remove-Item -LiteralPath $SpecPath -Force
+}
 Write-Host "Built: $BuiltPath"

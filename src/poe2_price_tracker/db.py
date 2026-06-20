@@ -1,9 +1,13 @@
+# Copyright (c) 2026 大狗狗
+# This file is part of this project and is licensed under the GNU GPL-3.0-only.
+# See the LICENSE file for details.
+
 from __future__ import annotations
 
 import sqlite3
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from difflib import SequenceMatcher
 from pathlib import Path
 
@@ -984,8 +988,9 @@ class PriceDatabase:
                 ]
             else:
                 history_values = []
-            local_trend = trend_percent(history_values)
-            display_trend = local_trend if len(history_values) >= 2 else ("" if has_realtime_history else (trend_match.group(1) if trend_match else ""))
+            trend_values = recent_trend_values(history, history_values)
+            local_trend = trend_percent(trend_values)
+            display_trend = local_trend if len(trend_values) >= 2 else ("" if has_realtime_history else (trend_match.group(1) if trend_match else ""))
             result.append(
                 MarketRow(
                     item_id=int(row["item_id"]),
@@ -999,7 +1004,7 @@ class PriceDatabase:
                     min_amount=float(row["min_amount"]),
                     max_amount=float(row["max_amount"]),
                     avg_amount=float(row["avg_amount"]),
-                    sparkline=sparkline(history_values),
+                    sparkline=sparkline(trend_values),
                     trend_percent=display_trend,
                     favorite=bool(row["favorite"]),
                     pinned=bool(row["pinned"]),
@@ -1995,6 +2000,40 @@ def sparkline(values: list[float]) -> str:
         idx = round((value - low) / (high - low) * (len(ticks) - 1))
         chars.append(ticks[idx])
     return "".join(chars)
+
+
+def _parse_captured_at(value: str) -> datetime | None:
+    text = str(value or "").strip()
+    if not text:
+        return None
+    try:
+        parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.astimezone(timezone.utc)
+
+
+def recent_trend_values(records: list[PriceRecord] | list[object], values: list[float], days: int = 7) -> list[float]:
+    if len(records) < 2 or len(values) < 2:
+        return []
+    paired = list(zip(records, values))
+    latest_time = None
+    for record, _value in reversed(paired):
+        latest_time = _parse_captured_at(str(getattr(record, "captured_at", "")))
+        if latest_time is not None:
+            break
+    if latest_time is None:
+        return list(values)
+    cutoff = latest_time - timedelta(days=max(1, int(days or 7)))
+    recent = [
+        value
+        for record, value in paired
+        if (record_time := _parse_captured_at(str(getattr(record, "captured_at", "")))) is not None
+        and record_time >= cutoff
+    ]
+    return recent if len(recent) >= 2 else []
 
 
 def trend_percent(values: list[float]) -> str:

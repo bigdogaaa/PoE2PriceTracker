@@ -263,6 +263,43 @@ def test_market_trend_uses_local_history_when_enough_points_exist():
         db.close()
 
 
+def test_market_trend_uses_recent_seven_day_history():
+    db = PriceDatabase(Path(":memory:"))
+    try:
+        db.add_price_record(
+            "TrendRecentItem",
+            10,
+            "Divine Orb",
+            "poe2db",
+            captured_at="2026-06-01T00:00:00+00:00",
+            raw_text="trend=+200%",
+        )
+        db.add_price_record(
+            "TrendRecentItem",
+            20,
+            "Divine Orb",
+            "poe2db",
+            captured_at="2026-06-12T00:00:00+00:00",
+            raw_text="trend=+200%",
+        )
+        db.add_price_record(
+            "TrendRecentItem",
+            30,
+            "Divine Orb",
+            "poe2db",
+            captured_at="2026-06-19T00:00:00+00:00",
+            raw_text="trend=+200%",
+        )
+
+        rows = db.get_market_rows(query="TrendRecentItem")
+
+        assert len(rows) == 1
+        assert rows[0].trend_percent == "+50%"
+        assert rows[0].sparkline
+    finally:
+        db.close()
+
+
 def test_market_trend_prefers_valid_realtime_history_over_poe2db_history():
     db = PriceDatabase(Path(":memory:"))
     try:
@@ -278,6 +315,47 @@ def test_market_trend_prefers_valid_realtime_history_over_poe2db_history():
         assert rows[0].source == "实时价格导入-买入"
         assert rows[0].sparkline == "▁█"
         assert rows[0].trend_percent == "+50%"
+    finally:
+        db.close()
+
+
+def test_market_trend_never_mixes_poe2db_when_realtime_history_exists():
+    db = PriceDatabase(Path(":memory:"))
+    try:
+        db.add_price_record(
+            "realtime-only-trend-item",
+            1,
+            "Divine Orb",
+            "poe2db",
+            captured_at="2026-06-18T00:00:00+00:00",
+            raw_text="trend=+9900%",
+        )
+        db.add_realtime_price_record(
+            "realtime-only-trend-item",
+            "buy",
+            10,
+            "Divine Orb",
+            source="realtime-import",
+        )
+        db.add_realtime_price_record(
+            "realtime-only-trend-item",
+            "buy",
+            15,
+            "Divine Orb",
+            source="realtime-import",
+        )
+
+        rows = db.get_market_rows(query="realtime-only-trend-item")
+        history = db.get_price_history(
+            "realtime-only-trend-item",
+            limit=12,
+            prefer_realtime_if_available=True,
+        )
+
+        assert len(rows) == 1
+        assert rows[0].count == 2
+        assert rows[0].trend_percent == "+50%"
+        assert [record.realtime_record_id > 0 for record in history] == [True, True]
     finally:
         db.close()
 

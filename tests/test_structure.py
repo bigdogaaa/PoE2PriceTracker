@@ -1,4 +1,3 @@
-import shutil
 from pathlib import Path
 
 from PIL import Image, ImageDraw
@@ -33,11 +32,7 @@ def box(text: str, left: int, top: int, right: int, bottom: int, score: float = 
     )
 
 
-def test_recognize_structured_prices_groups_rows_and_matches_items():
-    tmp_path = Path(".tmp-structure-test")
-    if tmp_path.exists():
-        shutil.rmtree(tmp_path, ignore_errors=True)
-    tmp_path.mkdir(parents=True, exist_ok=True)
+def test_recognize_structured_prices_groups_rows_and_matches_items(tmp_path):
     image_path = tmp_path / "table.png"
     image = Image.new("RGB", (640, 160), "#222222")
     draw = ImageDraw.Draw(image)
@@ -66,14 +61,9 @@ def test_recognize_structured_prices_groups_rows_and_matches_items():
     assert [row.item_name for row in rows] == ["卡兰德的魔镜", "神圣石"]
     assert [row.amount for row in rows] == [2586.0, 169.0]
     assert all(row.currency == "神圣石" for row in rows)
-    shutil.rmtree(tmp_path, ignore_errors=True)
 
 
-def test_recognize_item_candidates_keeps_reliable_fuzzy_matches():
-    tmp_path = Path(".tmp-structure-test")
-    if tmp_path.exists():
-        shutil.rmtree(tmp_path, ignore_errors=True)
-    tmp_path.mkdir(parents=True, exist_ok=True)
+def test_recognize_item_candidates_keeps_reliable_fuzzy_matches(tmp_path):
     image_path = tmp_path / "items.png"
     Image.new("RGB", (520, 120), "#222222").save(image_path)
     db = FakeDb()
@@ -93,7 +83,24 @@ def test_recognize_item_candidates_keeps_reliable_fuzzy_matches():
 
     assert [candidate.item_name for candidate in candidates] == ["卡兰德的魔镜", "神圣石"]
     assert all(candidate.confidence >= 0.62 for candidate in candidates)
-    shutil.rmtree(tmp_path, ignore_errors=True)
+
+
+def test_recognize_item_candidates_ignores_ui_labels(tmp_path):
+    image_path = tmp_path / "ui-labels.png"
+    Image.new("RGB", (420, 100), "#222222").save(image_path)
+    ocr = OcrResult(
+        text="拥有物品\n神秘钥匙",
+        engine="rapidocr",
+        ok=True,
+        boxes=(
+            box("拥有物品", 24, 12, 120, 36),
+            box("神秘钥匙", 24, 58, 140, 84),
+        ),
+    )
+
+    candidates = recognize_item_candidates(image_path, ocr, db=None, min_score=0.62)
+
+    assert [candidate.item_name for candidate in candidates] == ["神秘钥匙"]
 
 
 def test_strict_item_match_allows_only_one_character_error():

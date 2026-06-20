@@ -3,6 +3,7 @@ __pycache__/
 *.py[cod]
 *$py.class
 .pytest_cache/
+.test-cache/
 pytest-cache-files-*/
 .mypy_cache/
 .ruff_cache/
@@ -17,6 +18,7 @@ env/
 build/
 dist/
 release/
+.release-cache/
 *.spec
 *.zip
 *.exe
@@ -55,6 +57,7 @@ server/.env
 server/.env.*
 !server/.env.example
 server/ssl_child_test.txt
+server/redis_admin_known_items.cache.json
 
 # IDE and OS files
 .idea/

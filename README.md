@@ -2,6 +2,11 @@
 
 一个 Windows 本地版 POE2 查价器，主要面向国服玩家，用来快速查询、记录和关注通货类物品价格。
 
+> **重要协议说明：本项目采用 GPL-3.0-only + 单独商业授权 + 品牌资源保留的双许可证结构。**
+>
+> 源代码默认按 [GNU GPL-3.0-only](./LICENSE) 发布；闭源集成、商业再分发、定制发行、品牌合作、使用官方品牌资源或接入官方服务等场景需另行取得商业授权，详见 [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md)。  
+> 项目名称、Logo、图标、官方发布包、自动更新服务、云端数据服务、网站、截图、宣传素材和其他品牌资源不随 GPL 授权，详见 [TRADEMARK-NOTICE.md](./TRADEMARK-NOTICE.md)。
+
 价格数据目前主要来源于流亡2编年史的经济页：
 
 https://poe2db.tw/cn/Economy
@@ -160,9 +165,9 @@ https://poe2db.tw/cn/Economy
 
 https://github.com/bigdogaaa/PoE2PriceTracker/releases/latest
 
-当前版本：`0.4.10`
+当前版本：`0.4.22`
 
-如果你只是使用软件，下载 release 中的 `PoE2PriceTracker-0.4.10.exe` 即可。
+如果你只是使用软件，下载 release 中的 `PoE2PriceTracker-0.4.22.exe` 即可。
 
 ## 更新源
 
@@ -178,14 +183,14 @@ https://gitee.com/BiGDoGaaa/poe2pricetracker_version_info/raw/master/latest.json
 
 ```json
 {
-  "version": "0.4.10",
+  "version": "0.4.22",
   "channel": "stable",
-  "url": "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.4.10/PoE2PriceTracker-0.4.10.exe",
-  "download_url": "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.4.10/PoE2PriceTracker-0.4.10.exe",
+  "url": "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.4.22/PoE2PriceTracker-0.4.22.exe",
+  "download_url": "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.4.22/PoE2PriceTracker-0.4.22.exe",
   "manual_urls": ["https://pan.quark.cn/s/xxxx"],
   "sha256": "...",
   "size": 105518264,
-  "release_date": "2026-06-19",
+  "release_date": "2026-06-21",
   "notes": ["更新说明"],
   "mandatory": false
 }
@@ -194,9 +199,8 @@ https://gitee.com/BiGDoGaaa/poe2pricetracker_version_info/raw/master/latest.json
 统一发布脚本会更新 GitHub Release、把 `latest.json` 写到 Gitee，并把夸克链接写入 `manual_urls`：
 
 ```powershell
-$env:GITHUB_TOKEN="你的 GitHub token"
-$env:GITEE_TOKEN="你的 Gitee token"
-python scripts\publish_release_channels.py --version 0.4.10 --asset dist\PoE2PriceTracker-0.4.10.exe --quark-url "https://pan.quark.cn/s/xxxx" --notes "更新说明"
+# 按脚本要求配置发布凭据后执行：
+python scripts\publish_release_channels.py --version 0.4.22 --asset dist\PoE2PriceTracker-0.4.22.exe --quark-url "https://pan.quark.cn/s/xxxx" --notes-file release\notes-0.4.22.txt
 ```
 
 客户端默认读取 Gitee `latest.json`；如果检测到新版本，自动下载走 GitHub，手动下载按钮打开夸克链接。
@@ -231,31 +235,38 @@ python scripts\publish_release_channels.py --version 0.4.10 --asset dist\PoE2Pri
 
 ## 反馈
 
-作者：大狗狗丶丶
+如果遇到问题，请通过项目公开反馈渠道提交问题。反馈时不要包含账号、密码、令牌、聊天记录、支付信息或其他个人敏感信息。
 
-如果遇到问题，可以在踩蘑菇搜索同名账号留言反馈。
+## License / 许可证
 
-## 版权说明与免责声明
+This project is dual-licensed:
 
-本软件【流放之路2 物价追踪器】由【大狗狗丶丶】开发并发布。软件中由开发者原创的程序代码、界面设计、文档说明、配置文件及相关资源，除另有说明外，其著作权及相关权益归【大狗狗丶丶】所有。
+- Source code: GNU General Public License v3.0 only.
+- Commercial license: required for proprietary integration, commercial redistribution, customized distribution, brand cooperation, use of official branding assets, or access to official update/cloud services.
 
-未经版权所有者书面许可，任何个人或组织不得将本软件用于商业转售、恶意传播、二次打包、冒名发布、破解篡改、去除版权标识或其他侵犯开发者合法权益的行为。
+The project name, logo, icons, official release package, update service, cloud data service, website, screenshots, and other branding assets are not licensed under the GPL-3.0.
 
-本软件可能涉及的游戏名称、图标、截图、道具名称、文本数据、商标、素材或其他相关内容，其版权、商标权及相关权益均归原游戏厂商或相应权利人所有。本软件与相关游戏厂商、发行商或平台方不存在任何官方隶属、合作、授权、赞助或背书关系，除非另有明确书面说明。
+Unauthorized use of these assets to distribute unofficial or misleading versions is prohibited.
 
-本软件仅供学习、研究、技术交流及个人辅助分析使用，旨在帮助用户理解数据处理、文本识别、信息整理、游戏数据分析等相关技术原理。
+本项目采用双许可证授权：
 
-用户在使用本软件时，应遵守所在地区的法律法规、游戏平台规则、游戏用户协议、社区规范及相关服务条款。用户不得将本软件用于破坏游戏公平性、绕过安全机制、自动化作弊、非法牟利、攻击服务器、侵犯他人权益或其他不当用途。
+- 源代码：GNU General Public License v3.0 only；
+- 商业授权：闭源集成、商业再分发、定制发行、品牌合作、使用官方品牌资源、接入官方自动更新或云端服务等场景，需要另行取得商业授权。
 
-本软件按“现状”提供，开发者不对软件的适用性、稳定性、准确性、完整性、及时性或无错误运行作任何明示或默示保证。
+商务合作邮箱：`ef940413@163.com`
 
-用户因下载、安装、运行、修改、传播或使用本软件而产生的任何风险，包括但不限于账号限制、数据丢失、系统异常、软件冲突、游戏体验受影响、第三方平台处罚或其他直接、间接损失，均由用户自行承担。
+项目名称、Logo、图标、官方发布包、自动更新服务、云端数据服务、网站、截图及其他品牌资源不包含在 GPL-3.0 授权范围内。
 
-本软件不会主动鼓励、支持或引导用户违反任何游戏服务条款或平台规则。若用户将本软件用于违反法律法规、平台规则或游戏用户协议的行为，由此产生的一切责任均由用户自行承担，与开发者无关。
+未经许可，不得使用上述资源发布非官方版本，也不得以可能造成用户混淆的方式进行分发、宣传或销售。
 
-若本软件的任何内容无意中侵犯了相关权利人的合法权益，请通过踩蘑菇账号联系作者。经核实后，将及时进行修改、删除或其他合理处理。
+相关文件：
 
-用户下载、安装、运行或使用本软件，即视为已经阅读、理解并同意本版权说明与免责声明的全部内容。若用户不同意本声明中的任何条款，请立即停止使用并删除本软件。
+- [LICENSE](./LICENSE)：源代码 GPL-3.0-only 许可证；
+- [COMMERCIAL-LICENSE.md](./COMMERCIAL-LICENSE.md)：商业授权说明；
+- [TRADEMARK-NOTICE.md](./TRADEMARK-NOTICE.md)：品牌资源保留声明；
+- [CONTRIBUTING.md](./CONTRIBUTING.md)：贡献者授权说明；
+- [THIRD-PARTY-NOTICES.md](./THIRD-PARTY-NOTICES.md)：第三方声明；
+- [DISCLAIMER.md](./DISCLAIMER.md)：免责声明。
 
 ## 隐私与数据说明
 
@@ -271,6 +282,25 @@ python scripts\publish_release_channels.py --version 0.4.10 --asset dist\PoE2Pri
 
 ## 更新说明
 
+### 2026-06-21 v0.4.22
+
+- 显著优化 OCR 识别链路，增强对技能宝石、特殊物品等两行名称物品的识别能力。
+- 优化 F1 截图查价与 F6 实时价格导入的物品名称提取逻辑，减少名称截断和识别不完整的问题。
+- 大幅重做浮窗与配置页视觉表现，统一白色、深色、黑金主题下的配色、字体层级、间距和按钮质感。
+- 优化 F1 截图查价、F4 快捷查价、Ctrl+Space 聚焦搜索等浮窗在不同字体大小下的自适应表现，减少底部裁切、遮挡和错位。
+- 默认全局字体调整为 20 号，并在本次升级时对旧配置执行一次性字体迁移，后续用户手动调整会继续保留。
+- 修复和优化查询结果中的价格、趋势、来源、时间、点赞等信息展示一致性。
+- 调整开源共享协议说明，明确源代码采用 GPL-3.0-only，商业授权与品牌资源保留规则保持独立说明。
+
+### 2026-06-20 v0.4.20
+
+- 优化全局字号适配，修复菜单栏、分页栏、列表底部按钮和浮窗在大字号下显示不完整的问题。
+- 重构配置页视觉层级，保留分区边框并统一主题配色，减少主题切换后的残留渲染问题。
+- 统一 F4、Ctrl+Space、截图查价等浮窗中的价格、趋势和点赞显示，修复深色主题下点赞底纹、对齐和可见性问题。
+- 修复物价列表趋势排序异常，趋势排序改为基于计算后的有效趋势值。
+- 优化截图确认框、菜单按钮、配置按钮和主题按钮配色，降低廉价感并保持白色、深色、黑金主题的一致性。
+- 补齐 GPL-3.0-only + 商业授权 + 品牌资源保留的双许可证说明，并完善贡献、第三方声明和免责声明。
+
 ### 2026-06-20 v0.4.10
 
 - 修复 F4 快捷查价价格单位不跟随全局显示单位的问题。
@@ -279,6 +309,7 @@ python scripts\publish_release_channels.py --version 0.4.10 --asset dist\PoE2Pri
 - 新增价格小数位数配置和打开缓存位置按钮。
 - 启动时增加配置与数据库校验，减少损坏文件导致的启动失败。
 - 修复趋势显示一致性等已知问题，并优化本地查询性能。
+- 协议说明调整为 GPL-3.0-only + 单独商业授权 + 品牌资源保留，并补充贡献者与第三方声明。
 
 ### 2026-06-19 v0.4.9
 
@@ -342,7 +373,7 @@ python scripts\publish_release_channels.py --version 0.4.10 --asset dist\PoE2Pri
 - 新增实时价格评价机制：点赞绑定到单条实时价格记录，可通过最低赞数阈值过滤可信结果
 - 查询逻辑优化：同一物品存在满足阈值的实时价格时，优先展示实时价格；没有有效实时价格时再回退到 poe2db 或手动记录
 - 优化实时价格导入浮窗，修复底部文字显示不全和下拉框视觉溢出问题
-- 服务端增强：共享服务改为服务器代理 Redis 密钥，补充访问/提交日志，并支持自动重启
+- 服务端增强：共享服务改为服务器端代理密钥，补充访问/提交日志，并支持自动重启
 
 ### 2026-06-17 v0.3.21
 
