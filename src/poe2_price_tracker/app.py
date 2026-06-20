@@ -302,6 +302,7 @@ from .screenshot import (
     save_image,
 )
 from .structure import RecognizedItemCandidate, recognize_item_candidates, recognize_structured_prices
+from .themes import AppTheme, THEME_LABELS, theme_for_key, theme_key_for_label, theme_label_for_key
 from .updater import UpdateInfo, check_update, download_update
 
 
@@ -1041,6 +1042,7 @@ class PriceTrackerApp:
         except Exception:
             pass
         self.config = load_config()
+        self.theme: AppTheme = theme_for_key(getattr(self.config, "ui_theme", "default"))
         self.db = PriceDatabase(self.config.database_path)
         self.bundled_currency_icon_count = seed_bundled_currency_icons(self.db)
         self.ocr = self._make_ocr_engine()
@@ -1181,6 +1183,7 @@ class PriceTrackerApp:
         self._configure_style()
         self._build_menu()
         self._build_ui()
+        self._apply_theme_to_widget_tree(self.root)
         self.root.update_idletasks()
         self._set_root_initial_geometry(1120, 760)
         try:
@@ -1279,24 +1282,194 @@ class PriceTrackerApp:
         window.geometry(f"{width}x{height}+{x}+{y}")
 
     def _configure_style(self) -> None:
-        style = ttk.Style()
+        self.theme = theme_for_key(getattr(self.config, "ui_theme", "default"))
+        theme = self.theme
+        style = tb.Style() if tb is not None else ttk.Style()
+        self.style = style
         try:
-            style.theme_use("clam")
+            style.theme_use(theme.ttk_theme if tb is not None else "clam")
         except Exception:
             pass
         size = int(getattr(self.config, "font_size", 13))
         rowheight = max(72, size * 3 + 26)
-        style.configure("Treeview", rowheight=rowheight, font=("Microsoft YaHei UI", size))
-        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", size, "bold"))
-        style.configure("Market.Treeview", rowheight=rowheight, font=("Microsoft YaHei UI", size))
-        style.configure("Market.Treeview.Heading", font=("Microsoft YaHei UI", size, "bold"))
-        style.configure("TNotebook.Tab", padding=(16, 8))
+        font = ("Microsoft YaHei UI", size)
+        heading_font = ("Microsoft YaHei UI", size, "bold")
+        try:
+            self.root.configure(bg=theme.background)
+        except Exception:
+            pass
+        style.configure(".", font=font, background=theme.background, foreground=theme.text)
+        style.configure("TFrame", background=theme.background)
+        style.configure("Surface.TFrame", background=theme.surface)
+        style.configure("Sidebar.TFrame", background=theme.sidebar)
+        style.configure("TLabel", background=theme.background, foreground=theme.text)
+        style.configure("Muted.TLabel", background=theme.background, foreground=theme.muted)
+        style.configure("TLabelframe", background=theme.surface, bordercolor=theme.border, relief="solid")
+        style.configure(
+            "TLabelframe.Label",
+            background=theme.surface,
+            foreground=theme.text,
+            font=("Microsoft YaHei UI", size, "bold"),
+        )
+        style.configure("TButton", padding=(12, 7), font=("Microsoft YaHei UI", size))
+        style.configure("TEntry", fieldbackground=theme.input_bg, foreground=theme.text, bordercolor=theme.border)
+        style.configure(
+            "TCombobox",
+            fieldbackground=theme.input_bg,
+            background=theme.input_bg,
+            foreground=theme.text,
+            bordercolor=theme.border,
+            arrowsize=14,
+        )
+        style.configure("TCheckbutton", background=theme.background, foreground=theme.text)
+        style.configure("TNotebook", background=theme.background, borderwidth=0)
+        style.configure("TNotebook.Tab", padding=(16, 8), font=("Microsoft YaHei UI", size, "bold"))
+        style.configure(
+            "Treeview",
+            rowheight=rowheight,
+            font=font,
+            background=theme.surface,
+            fieldbackground=theme.surface,
+            foreground=theme.text,
+            bordercolor=theme.border,
+        )
+        style.configure(
+            "Treeview.Heading",
+            font=heading_font,
+            background=theme.tree_heading,
+            foreground=theme.text,
+            relief="flat",
+        )
+        style.map(
+            "Treeview",
+            background=[("selected", theme.selection_bg)],
+            foreground=[("selected", theme.text)],
+        )
+        style.configure(
+            "Market.Treeview",
+            rowheight=rowheight,
+            font=font,
+            background=theme.surface,
+            fieldbackground=theme.surface,
+            foreground=theme.text,
+            bordercolor=theme.border,
+        )
+        style.configure(
+            "Market.Treeview.Heading",
+            font=heading_font,
+            background=theme.tree_heading,
+            foreground=theme.text,
+            relief="flat",
+        )
+        style.map(
+            "Market.Treeview",
+            background=[("selected", theme.selection_bg)],
+            foreground=[("selected", theme.text)],
+        )
+        style.configure("Horizontal.TProgressbar", troughcolor=theme.surface_alt, background=theme.primary)
         style.configure(
             "Accent.TButton",
-            foreground="#ffffff",
-            background="#d92d20",
+            foreground=theme.primary_text,
+            background=theme.primary,
             padding=(14, 7),
         )
+        try:
+            style.map(
+                "Accent.TButton",
+                background=[("active", theme.primary_hover), ("pressed", theme.primary_hover)],
+                foreground=[("active", theme.primary_text), ("pressed", theme.primary_text)],
+            )
+        except Exception:
+            pass
+
+    def _tk_theme_defaults(self) -> set[str]:
+        return {
+            "SystemButtonFace",
+            "SystemWindow",
+            "SystemButtonText",
+            "black",
+            "#000000",
+            "#ffffff",
+            "#f8fafc",
+            "#eef3f8",
+            "#eef6ff",
+            "#172033",
+            "#40566f",
+            "#607080",
+            "#667085",
+            "#718096",
+            "#7b8794",
+            "#8a97a6",
+            "#9fb5cf",
+            "#b0bac5",
+            "#10151d",
+        }
+
+    def _apply_theme_to_widget_tree(self, widget=None) -> None:
+        theme = self.theme
+        widget = widget or self.root
+        defaults = self._tk_theme_defaults()
+
+        def apply_one(current) -> None:
+            try:
+                cls = str(current.winfo_class())
+            except Exception:
+                cls = ""
+            try:
+                if cls in {"Frame", "Labelframe"}:
+                    bg = theme.surface if cls == "Labelframe" else theme.background
+                    current.configure(bg=bg)
+                    if cls == "Labelframe":
+                        current.configure(fg=theme.text)
+                elif cls == "Label":
+                    current_bg = str(current.cget("bg"))
+                    current_fg = str(current.cget("fg"))
+                    if current_bg in defaults:
+                        current.configure(bg=theme.background)
+                    if current_fg in defaults:
+                        current.configure(fg=theme.text)
+                elif cls == "Canvas":
+                    current_bg = str(current.cget("bg"))
+                    if current_bg in defaults:
+                        current.configure(bg=theme.surface, highlightbackground=theme.border)
+                elif cls == "Text":
+                    current.configure(bg=theme.input_bg, fg=theme.text, insertbackground=theme.text)
+                elif cls == "Listbox":
+                    current.configure(
+                        bg=theme.input_bg,
+                        fg=theme.text,
+                        selectbackground=theme.selection_bg,
+                        selectforeground=theme.text,
+                        highlightbackground=theme.border,
+                    )
+            except Exception:
+                pass
+            for child in current.winfo_children():
+                apply_one(child)
+
+        apply_one(widget)
+        self._apply_theme_special_widgets()
+
+    def _apply_theme_special_widgets(self) -> None:
+        theme = self.theme
+        try:
+            self.bottom_bar.configure(bg=theme.surface_alt)
+        except Exception:
+            pass
+        try:
+            self.sidebar.configure(bg=theme.sidebar)
+        except Exception:
+            pass
+        try:
+            self.content.configure(bg=theme.background)
+        except Exception:
+            pass
+        tree = getattr(self, "market_tree", None)
+        if tree is not None:
+            try:
+                tree.tag_configure("pinned", background=theme.pinned)
+            except Exception:
+                pass
 
     def _build_menu(self) -> None:
         menu = Menu(self.root)
@@ -1365,6 +1538,7 @@ class PriceTrackerApp:
         self.update_source_var = StringVar()
         self.update_sources_listbox = None
         self.auto_update_var = StringVar(value="1" if self.config.auto_check_updates else "0")
+        self.ui_theme_var = StringVar(value=theme_label_for_key(getattr(self.config, "ui_theme", "default")))
         self.focus_search_shape_var = StringVar(value="圆角" if self.config.focus_search_rounded else "直角")
         self.focus_search_limit_var = StringVar(value=str(self.config.focus_search_limit))
         self.ocr_status_var = StringVar(value="截图识别已内置")
@@ -1883,6 +2057,10 @@ class PriceTrackerApp:
             child.destroy()
         self.market_tree = None
         self.source_filter_combo = None
+        try:
+            self.root.after_idle(lambda: self._apply_theme_to_widget_tree(self.root))
+        except Exception:
+            pass
 
     def _has_market_tree(self) -> bool:
         tree = getattr(self, "market_tree", None)
@@ -2699,6 +2877,12 @@ class PriceTrackerApp:
         unit = Combobox(row, textvariable=self.display_currency_var, values=["神圣石", "崇高石", "混沌石"], state="readonly")
         unit.pack(side=LEFT, fill=X, expand=True)
         unit.bind("<<ComboboxSelected>>", lambda _event: self.save_display_currency())
+        row = Frame(right)
+        row.pack(fill=X, pady=6)
+        Label(row, text="界面皮肤", width=14, anchor="w").pack(side=LEFT)
+        theme_combo = Combobox(row, textvariable=self.ui_theme_var, values=list(THEME_LABELS), state="readonly")
+        theme_combo.pack(side=LEFT, fill=X, expand=True)
+        theme_combo.bind("<<ComboboxSelected>>", lambda _event: self.save_ui_theme_setting())
         row = Frame(right)
         row.pack(fill=X, pady=6)
         Label(row, text="价格小数位数", width=14, anchor="w").pack(side=LEFT)
@@ -3602,7 +3786,8 @@ class PriceTrackerApp:
         icon_name = "rating.png"
         voted = record_id in self.realtime_session_votes
         selected = self.realtime_session_votes.get(record_id) == 1
-        light = bg.lower() in {"#10151d", "#000000"}
+        theme = getattr(self, "theme", theme_for_key("default"))
+        light = bool(getattr(theme, "is_dark", False)) or bg.lower() in {"#10151d", "#000000", theme.overlay_surface.lower()}
         image = self._rating_icon_image(icon_name, size=size, disabled=voted and not selected, light=light)
         vote_text = self._format_upvotes(upvotes)
         has_image = bool(image)
@@ -3612,8 +3797,8 @@ class PriceTrackerApp:
             image=image,
             text=label_text,
             compound=LEFT,
-            fg="#dbeafe" if light else "#2563eb",
-            bg="#e8fff1" if selected else bg,
+            fg=theme.primary if not light else theme.overlay_text,
+            bg=theme.selection_bg if selected else bg,
             relief="solid" if selected else "flat",
             bd=1 if selected else 0,
             padx=5,
@@ -4083,6 +4268,15 @@ class PriceTrackerApp:
         save_config(self.config)
         self.refresh_market_table()
 
+    def save_ui_theme_setting(self) -> None:
+        key = theme_key_for_label(self.ui_theme_var.get())
+        self.config.ui_theme = key
+        save_config(self.config)
+        self._configure_style()
+        self._apply_theme_to_widget_tree(self.root)
+        self._refresh_version_status_widget(self.version_status_var.get(), self.version_update_available)
+        self.status_var.set(f"界面皮肤已切换为 {theme_label_for_key(key)}。")
+
     def _realtime_min_upvotes(self) -> int:
         try:
             return max(0, int(getattr(self.config, "realtime_min_upvotes", 0) or 0))
@@ -4397,21 +4591,29 @@ class PriceTrackerApp:
             except Exception:
                 pass
         else:
-            overlay.configure(bg="#ffffff")
+            overlay.configure(bg=self.theme.overlay_surface)
         overlay.bind("<Escape>", lambda _event: self.destroy_focus_search_overlay())
         overlay.bind("<Control-space>", lambda _event: self.destroy_focus_search_overlay())
         overlay.bind("<Control-Key-space>", lambda _event: self.destroy_focus_search_overlay())
 
-        outer = Canvas(overlay, bg=transparent if self.config.focus_search_rounded else "#ffffff", highlightthickness=0)
+        theme = self.theme
+        outer = Canvas(overlay, bg=transparent if self.config.focus_search_rounded else theme.overlay_surface, highlightthickness=0)
         outer.pack(fill=BOTH, expand=True)
         self.focus_search_outer_canvas = outer
-        container = Frame(outer, bg="#ffffff", padx=16, pady=12, highlightthickness=0 if self.config.focus_search_rounded else 1, highlightbackground="#d8e1ea")
+        container = Frame(
+            outer,
+            bg=theme.overlay_surface,
+            padx=16,
+            pady=12,
+            highlightthickness=0 if self.config.focus_search_rounded else 1,
+            highlightbackground=theme.overlay_border,
+        )
         self.focus_search_container = container
         self.focus_search_container_window = outer.create_window((0, 0), window=container, anchor="nw")
 
-        search_row = Frame(container, bg="#ffffff")
+        search_row = Frame(container, bg=theme.overlay_surface)
         search_row.pack(fill=X)
-        Label(search_row, text="搜索", fg="#8a97a6", bg="#ffffff", font=("Microsoft YaHei UI", 12, "bold")).pack(side=LEFT)
+        Label(search_row, text="搜索", fg=theme.overlay_muted, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 12, "bold")).pack(side=LEFT)
         entry = Entry(search_row, textvariable=self.focus_search_var, font=("Microsoft YaHei UI", 17))
         entry.pack(side=LEFT, fill=X, expand=True, padx=(12, 0), ipady=3)
         entry.bind("<KeyRelease>", self.schedule_focus_search_refresh)
@@ -4429,11 +4631,11 @@ class PriceTrackerApp:
         unit.pack(side=LEFT, padx=(8, 0))
         unit.bind("<<ComboboxSelected>>", self.on_focus_search_currency_change)
 
-        result_box = Frame(container, bg="#ffffff")
+        result_box = Frame(container, bg=theme.overlay_surface)
         result_box.pack(fill=BOTH, expand=True, pady=(7, 0))
-        result_canvas = Canvas(result_box, bg="#ffffff", highlightthickness=0)
+        result_canvas = Canvas(result_box, bg=theme.overlay_surface, highlightthickness=0)
         result_scrollbar = ttk.Scrollbar(result_box, orient="vertical", command=result_canvas.yview)
-        result_inner = Frame(result_canvas, bg="#ffffff")
+        result_inner = Frame(result_canvas, bg=theme.overlay_surface)
         result_window = result_canvas.create_window((0, 0), window=result_inner, anchor="nw")
         result_inner.bind(
             "<Configure>",
@@ -4491,9 +4693,9 @@ class PriceTrackerApp:
         canvas.delete("shell")
         if rounded:
             points = self._rounded_rect_points(margin, margin, width - margin, height - margin, 18)
-            shell = canvas.create_polygon(points, smooth=True, fill="#ffffff", outline="#d8e1ea", tags="shell")
+            shell = canvas.create_polygon(points, smooth=True, fill=self.theme.overlay_surface, outline=self.theme.overlay_border, tags="shell")
         else:
-            shell = canvas.create_rectangle(0, 0, width, height, fill="#ffffff", outline="#d8e1ea", tags="shell")
+            shell = canvas.create_rectangle(0, 0, width, height, fill=self.theme.overlay_surface, outline=self.theme.overlay_border, tags="shell")
         canvas.tag_lower(shell)
         if self.focus_search_container_window is not None:
             canvas.coords(self.focus_search_container_window, margin, margin)
@@ -4599,47 +4801,48 @@ class PriceTrackerApp:
             except Exception:
                 pass
         else:
-            overlay.configure(bg="#ffffff")
+            overlay.configure(bg=self.theme.overlay_surface)
         overlay.bind("<Escape>", lambda _event: self.destroy_screenshot_lookup_overlay())
 
-        outer = Canvas(overlay, bg=transparent if self.config.focus_search_rounded else "#ffffff", highlightthickness=0)
+        theme = self.theme
+        outer = Canvas(overlay, bg=transparent if self.config.focus_search_rounded else theme.overlay_surface, highlightthickness=0)
         outer.pack(fill=BOTH, expand=True)
         self.screenshot_lookup_outer_canvas = outer
         container = Frame(
             outer,
-            bg="#ffffff",
+            bg=theme.overlay_surface,
             padx=16,
             pady=12,
             highlightthickness=0 if self.config.focus_search_rounded else 1,
-            highlightbackground="#d8e1ea",
+            highlightbackground=theme.overlay_border,
         )
         self.screenshot_lookup_container = container
         self.screenshot_lookup_container_window = outer.create_window((0, 0), window=container, anchor="nw")
         self._bind_screenshot_lookup_drag_recursive(container)
 
-        title_row = Frame(container, bg="#ffffff")
+        title_row = Frame(container, bg=theme.overlay_surface)
         title_row.pack(fill=X)
         Label(
             title_row,
             text="截图查价",
-            fg="#8a97a6",
-            bg="#ffffff",
+            fg=theme.overlay_muted,
+            bg=theme.overlay_surface,
             font=("Microsoft YaHei UI", 12, "bold"),
         ).pack(side=LEFT)
         Label(
             title_row,
             text="Esc 关闭",
-            fg="#b0bac5",
-            bg="#ffffff",
+            fg=theme.subtle,
+            bg=theme.overlay_surface,
             font=("Microsoft YaHei UI", 10),
         ).pack(side=RIGHT)
 
-        result_box = Frame(container, bg="#ffffff")
+        result_box = Frame(container, bg=theme.overlay_surface)
         result_box.pack(fill=X, expand=False, pady=(8, 0))
-        result_canvas = Canvas(result_box, bg="#ffffff", highlightthickness=0, takefocus=1)
+        result_canvas = Canvas(result_box, bg=theme.overlay_surface, highlightthickness=0, takefocus=1)
         result_canvas.bind("<Escape>", lambda _event: self.destroy_screenshot_lookup_overlay())
         result_scrollbar = ttk.Scrollbar(result_box, orient="vertical", command=result_canvas.yview)
-        result_inner = Frame(result_canvas, bg="#ffffff")
+        result_inner = Frame(result_canvas, bg=theme.overlay_surface)
         result_window = result_canvas.create_window((0, 0), window=result_inner, anchor="nw")
         result_inner.bind(
             "<Configure>",
@@ -4753,21 +4956,22 @@ class PriceTrackerApp:
         if overlay is None:
             return
         self._clear_screenshot_lookup_results()
+        theme = self.theme
         if not rows:
-            box = Frame(self.screenshot_lookup_results, bg="#ffffff", pady=8)
+            box = Frame(self.screenshot_lookup_results, bg=theme.overlay_surface, pady=8)
             box.pack(fill=X)
             Label(
                 box,
                 text="没有查到可靠物品",
-                fg="#172033",
-                bg="#ffffff",
+                fg=theme.overlay_text,
+                bg=theme.overlay_surface,
                 font=("Microsoft YaHei UI", 14, "bold"),
             ).pack(anchor="w")
             Label(
                 box,
                 text=message or "已把截图和识别文字放到截图识别页，可以稍后手动确认。",
-                fg="#7b8794",
-                bg="#ffffff",
+                fg=theme.overlay_muted,
+                bg=theme.overlay_surface,
                 font=("Microsoft YaHei UI", 10),
                 wraplength=600,
                 justify=LEFT,
@@ -4793,35 +4997,36 @@ class PriceTrackerApp:
     def _render_screenshot_lookup_row(self, index: int, row_data: MarketRow, confidence: float, raw_text: str) -> None:
         if self.screenshot_lookup_results is None:
             return
-        item = Frame(self.screenshot_lookup_results, bg="#ffffff", pady=5)
+        theme = self.theme
+        item = Frame(self.screenshot_lookup_results, bg=theme.overlay_surface, pady=5)
         item.pack(fill=X)
         if index:
-            Canvas(item, height=1, bg="#e8eef5", highlightthickness=0).pack(fill=X, pady=(0, 7))
-        body = Frame(item, bg="#ffffff")
+            Canvas(item, height=1, bg=theme.overlay_border, highlightthickness=0).pack(fill=X, pady=(0, 7))
+        body = Frame(item, bg=theme.overlay_surface)
         body.pack(fill=X)
         order = Label(
             body,
             text=str(index + 1),
-            fg="#98a2b3",
-            bg="#ffffff",
+            fg=theme.subtle,
+            bg=theme.overlay_surface,
             font=("Microsoft YaHei UI", 12, "bold"),
             width=3,
             anchor="w",
         )
         order.pack(side=LEFT)
-        name_box = Frame(body, bg="#ffffff")
+        name_box = Frame(body, bg=theme.overlay_surface)
         name_box.pack(side=LEFT, fill=X, expand=True)
         Label(
             name_box,
             text=row_data.item_name,
-            fg="#172033",
-            bg="#ffffff",
+            fg=theme.overlay_text,
+            bg=theme.overlay_surface,
             font=("Microsoft YaHei UI", 13, "bold"),
             anchor="w",
         ).pack(anchor="w")
         updated = self._format_time(row_data.latest_at)
         subtitle = f"{row_data.source}  {updated}" if updated else row_data.source
-        Label(name_box, text=subtitle, fg="#8a97a6", bg="#ffffff", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(1, 0))
+        Label(name_box, text=subtitle, fg=theme.overlay_muted, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(1, 0))
 
         target_currency = self.display_currency_var.get() or self.config.display_currency
         rate = self.db.get_exalted_per_divine()
@@ -4829,25 +5034,25 @@ class PriceTrackerApp:
         amount = display_amount_for_item(
             row_data.item_name, row_data.latest_amount, row_data.latest_currency, target_currency, rate, chaos_per_divine
         )
-        price_box = Frame(body, bg="#ffffff")
+        price_box = Frame(body, bg=theme.overlay_surface)
         price_box.pack(side=RIGHT, padx=(16, 0))
         self._render_rating_controls(
             price_box,
             row_data.realtime_record_id,
             row_data.source,
-            "#ffffff",
+            theme.overlay_surface,
             size=19,
             upvotes=row_data.realtime_upvotes,
         )
         Label(
             price_box,
             text=f"{self._format_amount(amount)} {target_currency}",
-            fg="#c77d00",
-            bg="#ffffff",
+            fg=theme.overlay_accent,
+            bg=theme.overlay_surface,
             font=("Microsoft YaHei UI", 13, "bold"),
         ).pack(anchor="e")
-        trend_color = "#1f9d55" if row_data.trend_percent.startswith("+") else "#d64545" if row_data.trend_percent.startswith("-") else "#8a97a6"
-        Label(price_box, text=f"趋势 {row_data.trend_percent or '暂无'}", fg=trend_color, bg="#ffffff", font=("Microsoft YaHei UI", 9)).pack(anchor="e")
+        trend_color = theme.success if row_data.trend_percent.startswith("+") else theme.danger if row_data.trend_percent.startswith("-") else theme.overlay_muted
+        Label(price_box, text=f"趋势 {row_data.trend_percent or '暂无'}", fg=trend_color, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 9)).pack(anchor="e")
         self._bind_screenshot_lookup_drag_recursive(item)
         self._bind_screenshot_lookup_click_recursive(item, row_data.item_name)
 
@@ -4943,9 +5148,9 @@ class PriceTrackerApp:
         canvas.delete("shell")
         if rounded:
             points = self._rounded_rect_points(margin, margin, width - margin, height - margin, 18)
-            shell = canvas.create_polygon(points, smooth=True, fill="#ffffff", outline="#d8e1ea", tags="shell")
+            shell = canvas.create_polygon(points, smooth=True, fill=self.theme.overlay_surface, outline=self.theme.overlay_border, tags="shell")
         else:
-            shell = canvas.create_rectangle(0, 0, width, height, fill="#ffffff", outline="#d8e1ea", tags="shell")
+            shell = canvas.create_rectangle(0, 0, width, height, fill=self.theme.overlay_surface, outline=self.theme.overlay_border, tags="shell")
         canvas.tag_lower(shell)
         if self.screenshot_lookup_container_window is not None:
             canvas.coords(self.screenshot_lookup_container_window, margin, margin)
@@ -5002,50 +5207,51 @@ class PriceTrackerApp:
         target_currency = self.display_currency_var.get() or self.config.display_currency
         rate = self.db.get_exalted_per_divine()
         chaos_per_divine = self.db.get_chaos_per_divine()
+        theme = self.theme
         if not rows:
             self._configure_focus_result_scroll(36, False)
-            row = Frame(self.focus_search_results, bg="#ffffff", pady=8)
+            row = Frame(self.focus_search_results, bg=theme.overlay_surface, pady=8)
             row.pack(fill=X)
-            Label(row, text="没有查询到匹配物品", fg="#7b8794", bg="#ffffff", font=("Microsoft YaHei UI", 12)).pack(anchor="w")
+            Label(row, text="没有查询到匹配物品", fg=theme.overlay_muted, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 12)).pack(anchor="w")
             self._position_focus_search_overlay(144)
             return
 
         for index, row_data in enumerate(rows):
-            item = Frame(self.focus_search_results, bg="#ffffff", pady=4)
+            item = Frame(self.focus_search_results, bg=theme.overlay_surface, pady=4)
             item.pack(fill=X)
             if index:
-                Canvas(item, height=1, bg="#e8eef5", highlightthickness=0).pack(fill=X, pady=(0, 6))
-            body = Frame(item, bg="#ffffff")
+                Canvas(item, height=1, bg=theme.overlay_border, highlightthickness=0).pack(fill=X, pady=(0, 6))
+            body = Frame(item, bg=theme.overlay_surface)
             body.pack(fill=X)
-            name_box = Frame(body, bg="#ffffff")
+            name_box = Frame(body, bg=theme.overlay_surface)
             name_box.pack(side=LEFT, fill=X, expand=True)
             Label(
                 name_box,
                 text=row_data.item_name,
-                fg="#172033",
-                bg="#ffffff",
+                fg=theme.overlay_text,
+                bg=theme.overlay_surface,
                 font=("Microsoft YaHei UI", 13, "bold"),
                 anchor="w",
             ).pack(anchor="w")
             subtitle = f"{row_data.source}  {self._format_time(row_data.latest_at)}"
-            Label(name_box, text=subtitle, fg="#8a97a6", bg="#ffffff", font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(1, 0))
+            Label(name_box, text=subtitle, fg=theme.overlay_muted, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 9)).pack(anchor="w", pady=(1, 0))
             amount = display_amount_for_item(
                 row_data.item_name, row_data.latest_amount, row_data.latest_currency, target_currency, rate, chaos_per_divine
             )
             price_text = f"{self._format_amount(amount)} {target_currency}"
-            price_box = Frame(body, bg="#ffffff")
+            price_box = Frame(body, bg=theme.overlay_surface)
             price_box.pack(side=RIGHT, padx=(16, 0))
             self._render_rating_controls(
                 price_box,
                 row_data.realtime_record_id,
                 row_data.source,
-                "#ffffff",
+                theme.overlay_surface,
                 size=19,
                 upvotes=row_data.realtime_upvotes,
             )
-            Label(price_box, text=price_text, fg="#c77d00", bg="#ffffff", font=("Microsoft YaHei UI", 13, "bold")).pack(anchor="e")
-            trend_color = "#1f9d55" if row_data.trend_percent.startswith("+") else "#d64545" if row_data.trend_percent.startswith("-") else "#8a97a6"
-            Label(price_box, text=f"趋势 {row_data.trend_percent or '暂无'}", fg=trend_color, bg="#ffffff", font=("Microsoft YaHei UI", 9)).pack(anchor="e")
+            Label(price_box, text=price_text, fg=theme.overlay_accent, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 13, "bold")).pack(anchor="e")
+            trend_color = theme.success if row_data.trend_percent.startswith("+") else theme.danger if row_data.trend_percent.startswith("-") else theme.overlay_muted
+            Label(price_box, text=f"趋势 {row_data.trend_percent or '暂无'}", fg=trend_color, bg=theme.overlay_surface, font=("Microsoft YaHei UI", 9)).pack(anchor="e")
             self._bind_focus_result_click_recursive(item, row_data.item_name)
         visible_rows = min(len(rows), 5)
         result_height = self._measure_focus_result_height(visible_rows)
@@ -5413,7 +5619,9 @@ class PriceTrackerApp:
         rating_upvotes: int = 0,
     ) -> None:
         width, min_height = 460, 260
-        trend_color = "#2fb344" if trend.startswith("+") else "#e03131" if trend.startswith("-") else "#9fb5cf"
+        theme = self.theme
+        card_bg = theme.overlay_surface
+        trend_color = theme.success if trend.startswith("+") else theme.danger if trend.startswith("-") else theme.overlay_muted
         overlay = self.quick_price_overlay
         if overlay is None or not self._toplevel_exists(overlay):
             overlay = Toplevel(self.root)
@@ -5428,16 +5636,16 @@ class PriceTrackerApp:
                 overlay.attributes("-alpha", 0.92)
             except Exception:
                 pass
-            overlay.configure(bg="#10151d")
+            overlay.configure(bg=card_bg)
             overlay.bind("<Escape>", lambda _event: self._destroy_quick_price_overlay())
 
-            frame = Frame(overlay, bg="#10151d", padx=22, pady=20)
+            frame = Frame(overlay, bg=card_bg, padx=22, pady=20)
             frame.pack(fill=BOTH, expand=True)
             content_width = width - 56
             subtitle_label = Label(
                 frame,
-                fg="#9fb5cf",
-                bg="#10151d",
+                fg=theme.overlay_muted,
+                bg=card_bg,
                 font=("Microsoft YaHei UI", 11),
                 wraplength=content_width,
                 justify=LEFT,
@@ -5445,29 +5653,29 @@ class PriceTrackerApp:
             subtitle_label.pack(anchor="w")
             title_label = Label(
                 frame,
-                fg="#f8fafc",
-                bg="#10151d",
+                fg=theme.overlay_text,
+                bg=card_bg,
                 font=("Microsoft YaHei UI", 18, "bold"),
                 wraplength=content_width,
                 justify=LEFT,
             )
             title_label.pack(anchor="w", pady=(8, 12))
-            price_row = Frame(frame, bg="#10151d")
+            price_row = Frame(frame, bg=card_bg)
             price_row.pack(fill=X)
             price_label = Label(
                 price_row,
-                fg="#ffd166",
-                bg="#10151d",
+                fg=theme.overlay_accent,
+                bg=card_bg,
                 font=("Microsoft YaHei UI", 22, "bold"),
                 wraplength=content_width - 100,
                 justify=LEFT,
             )
             price_label.pack(side=LEFT, anchor="w", fill=X, expand=True)
-            rating_frame = Frame(price_row, bg="#10151d")
+            rating_frame = Frame(price_row, bg=card_bg)
             rating_frame.pack(side=RIGHT, padx=(12, 0))
             trend_label = Label(
                 frame,
-                bg="#10151d",
+                bg=card_bg,
                 font=("Microsoft YaHei UI", 13, "bold"),
                 wraplength=content_width,
                 justify=LEFT,
@@ -5476,8 +5684,8 @@ class PriceTrackerApp:
             hint_label = Label(
                 frame,
                 text="点击或 Esc 关闭，5 秒后自动隐藏",
-                fg="#718096",
-                bg="#10151d",
+                fg=theme.subtle,
+                bg=card_bg,
                 font=("Microsoft YaHei UI", 10),
                 wraplength=content_width,
                 justify=RIGHT,
@@ -5494,6 +5702,25 @@ class PriceTrackerApp:
             self._bind_destroy_on_click_recursive(overlay, overlay)
 
         labels = self.quick_price_overlay_labels
+        for key in ("frame", "rating"):
+            widget = labels.get(key)
+            if widget is not None:
+                try:
+                    widget.configure(bg=card_bg)
+                except Exception:
+                    pass
+        for key, fg in {
+            "subtitle": theme.overlay_muted,
+            "title": theme.overlay_text,
+            "price": theme.overlay_accent,
+            "trend": trend_color,
+        }.items():
+            widget = labels.get(key)
+            if widget is not None:
+                try:
+                    widget.configure(bg=card_bg, fg=fg)
+                except Exception:
+                    pass
         labels["subtitle"].configure(text=subtitle or "快速查价")
         labels["title"].configure(text=title)
         labels["price"].configure(text=price)
@@ -5506,7 +5733,7 @@ class PriceTrackerApp:
                 rating_frame,
                 rating_record_id,
                 rating_source,
-                "#10151d",
+                card_bg,
                 size=24,
                 upvotes=rating_upvotes,
                 force_text_icon=True,
@@ -5632,17 +5859,18 @@ class PriceTrackerApp:
             overlay.attributes("-alpha", 0.95)
         except Exception:
             pass
-        overlay.configure(bg="#eef3f8")
+        theme = self.theme
+        overlay.configure(bg=theme.overlay_bg)
         overlay.bind("<Escape>", lambda _event: self.destroy_realtime_import_overlay())
-        frame = Frame(overlay, bg="#ffffff", padx=22, pady=18, highlightthickness=1, highlightbackground="#d8e1ea")
+        frame = Frame(overlay, bg=theme.overlay_surface, padx=22, pady=18, highlightthickness=1, highlightbackground=theme.overlay_border)
         frame.pack(fill=BOTH, expand=True, padx=12, pady=12)
-        header = Frame(frame, bg="#ffffff")
+        header = Frame(frame, bg=theme.overlay_surface)
         header.pack(fill=X)
         Label(
             header,
             text="实时价格导入",
-            fg="#172033",
-            bg="#ffffff",
+            fg=theme.overlay_text,
+            bg=theme.overlay_surface,
             font=("Microsoft YaHei UI", 16, "bold"),
         ).pack(side=LEFT)
         submit = Button(header, text="提交记录", command=lambda: self.save_market_exchange_record(show_message=False))
@@ -5650,8 +5878,8 @@ class PriceTrackerApp:
         state = Label(
             header,
             text="等待识别",
-            fg="#2563eb",
-            bg="#eef6ff",
+            fg=theme.primary,
+            bg=theme.surface_alt,
             font=("Microsoft YaHei UI", 10, "bold"),
             padx=10,
             pady=4,
@@ -5663,14 +5891,14 @@ class PriceTrackerApp:
         hint = Label(
             frame,
             text="确认识别结果后提交。只允许修正物品名和买入/卖出方向，价格比例由截图自动计算。",
-            fg="#7b8794",
-            bg="#ffffff",
+            fg=theme.overlay_muted,
+            bg=theme.overlay_surface,
             font=("Microsoft YaHei UI", 10),
             anchor="w",
         )
         hint.pack(fill=X, pady=(8, 12))
 
-        table = Frame(frame, bg="#eef2f6")
+        table = Frame(frame, bg=theme.overlay_border)
         table.pack(fill=X)
         table.columnconfigure(1, weight=1)
         for row_index in range(1, 5):
@@ -5679,9 +5907,9 @@ class PriceTrackerApp:
         combo_style.configure(
             "RealtimeImport.TCombobox",
             padding=(8, 4, 8, 4),
-            fieldbackground="#ffffff",
-            background="#ffffff",
-            foreground="#172033",
+            fieldbackground=theme.input_bg,
+            background=theme.input_bg,
+            foreground=theme.text,
             arrowsize=14,
         )
         headers = ("字段", "识别结果", "说明")
@@ -5689,8 +5917,8 @@ class PriceTrackerApp:
             Label(
                 table,
                 text=text,
-                fg="#475467",
-                bg="#f8fafc",
+                fg=theme.muted,
+                bg=theme.surface_alt,
                 font=("Microsoft YaHei UI", 10, "bold"),
                 padx=10,
                 pady=8,
@@ -5701,8 +5929,8 @@ class PriceTrackerApp:
             Label(
                 table,
                 text=text,
-                fg="#172033",
-                bg="#fbfdff",
+                fg=theme.text,
+                bg=theme.card,
                 font=("Microsoft YaHei UI", 11),
                 padx=10,
                 pady=9,
@@ -5714,8 +5942,8 @@ class PriceTrackerApp:
             label = Label(
                 table,
                 text=text,
-                fg="#667085",
-                bg="#fbfdff",
+                fg=theme.muted,
+                bg=theme.card,
                 font=("Microsoft YaHei UI", 10),
                 padx=10,
                 pady=9,
@@ -5726,7 +5954,7 @@ class PriceTrackerApp:
             return label
 
         def input_cell(row: int) -> Frame:
-            cell = Frame(table, bg="#fbfdff", padx=10, pady=5)
+            cell = Frame(table, bg=theme.card, padx=10, pady=5)
             cell.grid(row=row, column=1, sticky="nsew", padx=(1, 0), pady=(0, 1))
             cell.columnconfigure(0, weight=1)
             return cell
@@ -5761,8 +5989,8 @@ class PriceTrackerApp:
         message = Label(
             frame,
             text="",
-            fg="#667085",
-            bg="#ffffff",
+            fg=theme.overlay_muted,
+            bg=theme.overlay_surface,
             font=("Microsoft YaHei UI", 10),
             anchor="w",
             justify=LEFT,
@@ -5770,13 +5998,13 @@ class PriceTrackerApp:
             height=2,
         )
         message.pack(fill=X, pady=(10, 0))
-        current_price_row = Frame(frame, bg="#ffffff")
+        current_price_row = Frame(frame, bg=theme.overlay_surface)
         current_price_row.pack(fill=X, pady=(6, 0))
         current_price = Label(
             current_price_row,
             text="当前记录：等待识别",
-            fg="#344054",
-            bg="#ffffff",
+            fg=theme.overlay_text,
+            bg=theme.overlay_surface,
             font=("Microsoft YaHei UI", 10, "bold"),
             anchor="w",
             justify=LEFT,
@@ -5784,10 +6012,10 @@ class PriceTrackerApp:
             height=2,
         )
         current_price.pack(side=LEFT, fill=X, expand=True)
-        current_rating = Frame(current_price_row, bg="#ffffff")
+        current_rating = Frame(current_price_row, bg=theme.overlay_surface)
         current_rating.pack(side=RIGHT, padx=(8, 0))
 
-        buttons = Frame(frame, bg="#ffffff")
+        buttons = Frame(frame, bg=theme.overlay_surface)
         buttons.pack(fill=X, side="bottom", pady=(8, 0))
         Button(buttons, text="关闭", command=self.destroy_realtime_import_overlay).pack(side=RIGHT)
         self.realtime_import_labels = {
@@ -5831,7 +6059,8 @@ class PriceTrackerApp:
         self.realtime_amount_var.set("")
         self.realtime_currency_var.set("崇高石")
         self.realtime_import_confirmed = False
-        labels["state"].configure(text="识别中", fg="#2563eb", bg="#eef6ff")
+        theme = self.theme
+        labels["state"].configure(text="识别中", fg=theme.primary, bg=theme.surface_alt)
         labels["hint"].configure(text="正在分析截图中的物品和交易比例，请稍候。")
         labels["item_note"].configure(text="等待结果")
         labels["side_note"].configure(text="等待结果")
@@ -5847,8 +6076,9 @@ class PriceTrackerApp:
     def show_realtime_import_result(self, message: str = "", failed: bool = False) -> None:
         overlay = self._ensure_realtime_import_overlay()
         labels = self.realtime_import_labels
+        theme = self.theme
         if failed:
-            labels["state"].configure(text="未识别", fg="#b42318", bg="#fff1f3")
+            labels["state"].configure(text="未识别", fg=theme.danger, bg=theme.surface_alt)
             labels["hint"].configure(text="没有识别到可靠价格，请重新框选完整市场区域。")
             labels["item_note"].configure(text="需要填写")
             labels["side_note"].configure(text="可选择")
@@ -5881,7 +6111,8 @@ class PriceTrackerApp:
         labels = self.realtime_import_labels
         state = labels.get("state")
         if state is not None:
-            state.configure(text="待确认", fg="#92400e", bg="#fef3c7", cursor="hand2")
+            theme = self.theme
+            state.configure(text="待确认", fg=theme.warning, bg=theme.surface_alt, cursor="hand2")
         self._update_realtime_import_submit_state()
 
     def confirm_realtime_import_result(self) -> None:
@@ -5890,7 +6121,8 @@ class PriceTrackerApp:
         self.realtime_import_confirmed = True
         state = self.realtime_import_labels.get("state")
         if state is not None:
-            state.configure(text="已确认", fg="#067647", bg="#ecfdf3", cursor="hand2")
+            theme = self.theme
+            state.configure(text="已确认", fg=theme.success, bg=theme.surface_alt, cursor="hand2")
         self._update_realtime_import_submit_state()
 
     def _update_realtime_import_submit_state(self) -> None:

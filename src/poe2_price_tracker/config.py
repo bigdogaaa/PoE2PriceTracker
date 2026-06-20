@@ -6,6 +6,8 @@ from dataclasses import asdict, dataclass, field
 from pathlib import Path
 from typing import Any
 
+from .themes import normalize_theme_key
+
 
 APP_DIR_NAME = "PoE2PriceTracker"
 GITHUB_RELEASE_BASE = "https://github.com/bigdogaaa/PoE2PriceTracker/releases"
@@ -47,6 +49,7 @@ class AppConfig:
     screenshot_height: int = 520
     ocr_engine: str = "rapidocr"
     font_size: int = 15
+    ui_theme: str = "default"
     price_decimal_places: int = 3
     display_currency: str = "神圣石"
     page_size: int = 25
@@ -181,6 +184,7 @@ def load_config() -> AppConfig:
         loaded.hotkeys.focus_search = "Ctrl+Space"
     if loaded.font_size < 15:
         loaded.font_size = 15
+    loaded.ui_theme = normalize_theme_key(getattr(loaded, "ui_theme", "default"))
     if loaded.page_size == 50:
         loaded.page_size = 25
     try:
