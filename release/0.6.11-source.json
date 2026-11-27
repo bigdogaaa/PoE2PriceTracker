@@ -1,0 +1,7 @@
+{
+  "asset_name": "PoE-Price-Tracker-0.6.11-Setup.exe",
+  "size": 144282878,
+  "sha256": "0ed351db7d6959bda0ec11ea1068668d88a621588d2184fbf2f74c6173d2fcf8",
+  "part_count": 18,
+  "part_url_template": "https://gitee.com/BiGDoGaaa/bigdog_software_release/raw/master/releases/0.6.11/PoE-Price-Tracker-0.6.11-Setup.exe.part{0:D2}"
+}

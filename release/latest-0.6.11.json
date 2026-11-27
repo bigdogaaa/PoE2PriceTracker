@@ -1,0 +1,29 @@
+{
+  "version": "0.6.11",
+  "channel": "stable",
+  "url": "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.6.11/PoE-Price-Tracker-0.6.11-Setup.exe",
+  "download_url": "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.6.11/PoE-Price-Tracker-0.6.11-Setup.exe",
+  "download_urls": [
+    "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.6.11/PoE-Price-Tracker-0.6.11-Setup.exe"
+  ],
+  "manual_urls": [],
+  "sha256": "0ed351db7d6959bda0ec11ea1068668d88a621588d2184fbf2f74c6173d2fcf8",
+  "size": 144282878,
+  "release_date": "2026-11-28",
+  "notes": [
+    "特殊物品行情中的“规格”已改为“物品特征”。",
+    "技能石等级、品质、连接、地图阶级和腐化状态改用游戏内常用表达。",
+    "地图报价会标出 T 阶、菌潮状态和守卫名称，方便区分同名物品。",
+    "正式版改用安装包，软件和玩家数据可以分别选择保存位置。",
+    "安装与后续更新不会删除本地价格、收藏、Cookie 和设置。"
+  ],
+  "mandatory": false,
+  "installer": {
+    "download_url": "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.6.11/PoE-Price-Tracker-0.6.11-Setup.exe",
+    "download_urls": [
+      "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.6.11/PoE-Price-Tracker-0.6.11-Setup.exe"
+    ],
+    "sha256": "0ed351db7d6959bda0ec11ea1068668d88a621588d2184fbf2f74c6173d2fcf8",
+    "size": 144282878
+  }
+}

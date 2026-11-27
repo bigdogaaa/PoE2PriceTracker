@@ -1,0 +1,77 @@
+name: Publish installer release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  publish:
+    runs-on: windows-latest
+    steps:
+      - name: Check out release metadata
+        uses: actions/checkout@v4
+
+      - name: Download and verify installer
+        shell: pwsh
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $metadataPath = Join-Path 'release' "$version-source.json"
+          if (-not (Test-Path -LiteralPath $metadataPath)) {
+            throw "Missing release metadata: $metadataPath"
+          }
+          $metadata = Get-Content -LiteralPath $metadataPath -Raw | ConvertFrom-Json
+          $artifactDir = Join-Path $env:RUNNER_TEMP "poe-price-tracker-$version"
+          New-Item -ItemType Directory -Path $artifactDir -Force | Out-Null
+          $partPaths = @()
+          for ($index = 0; $index -lt [int]$metadata.part_count; $index++) {
+            $partPath = Join-Path $artifactDir ("part-{0:D2}" -f ($index + 1))
+            $partUrl = [string]$metadata.part_url_template -f ($index + 1)
+            & curl.exe --fail --location --retry 5 --retry-all-errors --output $partPath $partUrl
+            if ($LASTEXITCODE -ne 0) {
+              throw "Failed to download release part $($index + 1)"
+            }
+            $partPaths += $partPath
+          }
+          $installer = Join-Path $artifactDir $metadata.asset_name
+          $output = [IO.File]::Create($installer)
+          try {
+            foreach ($partPath in $partPaths) {
+              $input = [IO.File]::OpenRead($partPath)
+              try { $input.CopyTo($output) } finally { $input.Dispose() }
+            }
+          } finally {
+            $output.Dispose()
+          }
+          $actualHash = (Get-FileHash -LiteralPath $installer -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actualHash -ne [string]$metadata.sha256) {
+            throw "Installer checksum mismatch"
+          }
+          $actualSize = (Get-Item -LiteralPath $installer).Length
+          if ($actualSize -ne [int64]$metadata.size) {
+            throw "Installer size mismatch"
+          }
+          Copy-Item -LiteralPath (Join-Path 'release' "latest-$version.json") -Destination (Join-Path $artifactDir 'latest.json') -Force
+          Copy-Item -LiteralPath (Join-Path 'release' "notice-$version.json") -Destination (Join-Path $artifactDir 'notice.json') -Force
+          "ARTIFACT_DIR=$artifactDir" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "INSTALLER=$installer" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Create GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = $env:GITHUB_REF_NAME.TrimStart('v')
+          $notes = Join-Path 'release' "notes-$version.txt"
+          & gh release view $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY *> $null
+          if ($LASTEXITCODE -eq 0) {
+            & gh release edit $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --title $env:GITHUB_REF_NAME --notes-file $notes --latest
+          } else {
+            & gh release create $env:GITHUB_REF_NAME --repo $env:GITHUB_REPOSITORY --title $env:GITHUB_REF_NAME --notes-file $notes --latest
+          }
+          if ($LASTEXITCODE -ne 0) { throw "Failed to create GitHub release" }
+          & gh release upload $env:GITHUB_REF_NAME $env:INSTALLER (Join-Path $env:ARTIFACT_DIR 'latest.json') (Join-Path $env:ARTIFACT_DIR 'notice.json') --repo $env:GITHUB_REPOSITORY --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Failed to upload release assets" }
