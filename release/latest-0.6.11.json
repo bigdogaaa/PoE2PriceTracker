@@ -6,7 +6,9 @@
   "download_urls": [
     "https://github.com/bigdogaaa/PoE2PriceTracker/releases/download/v0.6.11/PoE-Price-Tracker-0.6.11-Setup.exe"
   ],
-  "manual_urls": [],
+  "manual_urls": [
+    "https://pan.quark.cn/s/d605b9c41efb"
+  ],
   "sha256": "0ed351db7d6959bda0ec11ea1068668d88a621588d2184fbf2f74c6173d2fcf8",
   "size": 144282878,
   "release_date": "2026-11-28",
